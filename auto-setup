@@ -1,0 +1,61 @@
+#!/bin/sh
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# ---- Find USB (silent) ----
+USB=""
+for m in /media/* /mnt/*; do
+    [ -d "$m/bin_all" ] && USB="$m" && break
+    [ -d "$m/packages" ] && USB="$m" && break
+    [ -d "$m/apks" ] && USB="$m" && break
+done
+if [ -z "$USB" ]; then
+    for dev in $(blkid -t TYPE=vfat -o device 2>/dev/null); do
+        mkdir -p /tmp/usb_try
+        mount -t vfat "$dev" /tmp/usb_try 2>/dev/null || continue
+        if [ -d "/tmp/usb_try/bin_all" ] || [ -d "/tmp/usb_try/packages" ]; then
+            USB="/tmp/usb_try"; break
+        fi
+        umount /tmp/usb_try 2>/dev/null
+    done
+fi
+
+# ---- Mount modloop for kernel modules ----
+KVER=$(uname -r 2>/dev/null)
+if [ ! -d "/lib/modules/$KVER" ] || [ -z "$(ls /lib/modules/$KVER/ 2>/dev/null)" ]; then
+    mkdir -p /.modloop
+    if [ -n "$USB" ] && [ -f "$USB/boot/modloop-lts" ]; then
+        mount -t squashfs -o loop "$USB/boot/modloop-lts" /.modloop 2>/dev/null
+        [ -d "/.modloop/modules" ] && { rm -f /lib/modules 2>/dev/null; ln -sf /.modloop/modules /lib/modules; }
+    fi
+fi
+
+# ---- Install ALL binaries (instant file copies) ----
+if [ -n "$USB" ] && [ -d "$USB/bin_all" ]; then
+    B="$USB/bin_all"
+    [ ! -x /usr/bin/chntpw ] && cp "$B/chntpw" /usr/bin/ && chmod +x /usr/bin/chntpw 2>/dev/null
+    [ ! -x /bin/ntfs-3g ] && {
+        cp "$B/ntfs-3g" "$B/lowntfs-3g" /bin/ 2>/dev/null
+        cp "$B/libntfs-3g.so.89" "$B/libntfs-3g.so.89.0.0" /usr/lib/ 2>/dev/null
+        chmod +x /bin/ntfs-3g /bin/lowntfs-3g 2>/dev/null
+        ln -sf /bin/ntfs-3g /sbin/mount.ntfs-3g 2>/dev/null
+        ln -sf /bin/ntfs-3g /sbin/mount.ntfs 2>/dev/null
+    }
+    [ ! -x /usr/sbin/smartctl ] && {
+        cp "$B/smartctl" /usr/sbin/ && chmod +x /usr/sbin/smartctl 2>/dev/null
+        mkdir -p /usr/share/smartmontools && cp "$B/drivedb.h" /usr/share/smartmontools/ 2>/dev/null
+    }
+    [ ! -x /sbin/hdparm ] && cp "$B/hdparm" /sbin/ && chmod +x /sbin/hdparm 2>/dev/null
+    [ ! -x /usr/sbin/dmidecode ] && cp "$B/dmidecode" /usr/sbin/ && chmod +x /usr/sbin/dmidecode 2>/dev/null
+    ldconfig 2>/dev/null
+fi
+
+# ---- Load storage modules only (needed for disk access) ----
+for mod in ntfs3 fuse nvme ahci mmc_core mmc_block sdhci sdhci_pci xhci_hcd xhci_pci uas; do
+    modprobe "$mod" 2>/dev/null
+done
+
+# ---- Copy WiFi firmware (quick, no driver loading) ----
+[ -n "$USB" ] && [ -d "$USB/firmware" ] && cp "$USB/firmware"/*.ucode /lib/firmware/ 2>/dev/null
+
+# ---- Start USB watchdog ----
+[ -n "$USB" ] && sh /usr/local/bin/usb-watchdog "$USB" &

@@ -1,0 +1,532 @@
+#!/bin/sh
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+while true; do
+    clear
+    printf "${YELLOW}  Run: sh /usr/local/bin/toolkit-menu${NC}\n"
+    printf "${CYAN}=== Hardware Tests ===${NC}\n\n"
+    printf "  ${BOLD}1)${NC} Quick RAM Test\n"
+    printf "  ${BOLD}2)${NC} CPU Stress Test\n"
+    printf "  ${BOLD}3)${NC} Battery Health\n"
+    printf "  ${BOLD}4)${NC} Keyboard Tester\n"
+    printf "  ${BOLD}5)${NC} Display Test (color patterns)\n"
+    printf "  ${BOLD}6)${NC} Temperature Monitor (live)\n"
+    printf "  ${BOLD}0)${NC} Back to main menu\n"
+    printf "\n  Choose: "; read CH
+
+    case "$CH" in
+        1)
+            printf "\n${BOLD}  Quick RAM Test (userspace)${NC}\n"
+            printf "  Writing test patterns to tmpfs (/dev/shm) and verifying.\n\n"
+
+            # Determine available memory for testing (use ~25% of free RAM)
+            FREE_KB=$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null)
+            TEST_KB=$((FREE_KB / 4))
+            # Cap at 512MB to keep test reasonable
+            [ "$TEST_KB" -gt 524288 ] && TEST_KB=524288
+            TEST_MB=$((TEST_KB / 1024))
+
+            printf "  Available RAM: %s MB\n" "$((FREE_KB / 1024))"
+            printf "  Testing with:  %s MB\n\n" "$TEST_MB"
+
+            TESTDIR="/dev/shm/ramtest_$$"
+            mkdir -p "$TESTDIR"
+            ERRORS=0
+            PASS=0
+
+            for PATTERN in "00" "FF" "AA" "55"; do
+                printf "  Pattern 0x%s ... " "$PATTERN"
+                TESTFILE="$TESTDIR/pat_${PATTERN}"
+
+                # Create a block of the pattern (1 byte repeated)
+                BYTE=$(printf "\\x${PATTERN}")
+
+                # Write pattern: create test data with dd
+                case "$PATTERN" in
+                    00) dd if=/dev/zero of="$TESTFILE" bs=1024 count="$TEST_KB" 2>/dev/null ;;
+                    FF) tr '\000' '\377' < /dev/zero | dd of="$TESTFILE" bs=1024 count="$TEST_KB" 2>/dev/null ;;
+                    AA) tr '\000' '\252' < /dev/zero | dd of="$TESTFILE" bs=1024 count="$TEST_KB" 2>/dev/null ;;
+                    55) tr '\000' '\125' < /dev/zero | dd of="$TESTFILE" bs=1024 count="$TEST_KB" 2>/dev/null ;;
+                esac
+
+                # Read back and verify by computing checksum, then compare with fresh generation
+                WRITTEN_MD5=$(md5sum "$TESTFILE" 2>/dev/null | awk '{print $1}')
+
+                # Re-read the file (force cache flush if possible)
+                sync
+                echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+                READBACK_MD5=$(md5sum "$TESTFILE" 2>/dev/null | awk '{print $1}')
+
+                if [ "$WRITTEN_MD5" = "$READBACK_MD5" ] && [ -n "$WRITTEN_MD5" ]; then
+                    printf "${GREEN}PASS${NC}\n"
+                    PASS=$((PASS + 1))
+                else
+                    printf "${RED}FAIL${NC}\n"
+                    ERRORS=$((ERRORS + 1))
+                fi
+
+                rm -f "$TESTFILE"
+            done
+
+            rm -rf "$TESTDIR"
+
+            printf "\n  Results: %s/4 patterns passed\n" "$PASS"
+            if [ "$ERRORS" -eq 0 ]; then
+                printf "  ${GREEN}${BOLD}RAM test PASSED - no errors detected.${NC}\n"
+            else
+                printf "  ${RED}${BOLD}RAM test FAILED - %s pattern(s) had errors!${NC}\n" "$ERRORS"
+            fi
+            printf "\n  ${YELLOW}Note: This is a quick userspace test. For thorough testing,${NC}\n"
+            printf "  ${YELLOW}use memtest86+ (requires reboot).${NC}\n"
+            printf "\n  Press Enter..."; read dummy
+            ;;
+        2)
+            printf "\n${BOLD}  CPU Stress Test${NC}\n\n"
+            CORES=$(grep -c "^processor" /proc/cpuinfo 2>/dev/null)
+            CORES=${CORES:-1}
+            printf "  Detected CPU cores: %s\n" "$CORES"
+            printf "  Duration in seconds [30]: "; read DURATION
+            DURATION=${DURATION:-30}
+
+            # Validate numeric
+            case "$DURATION" in
+                ''|*[!0-9]*) printf "${RED}  Invalid number.${NC}\n"; sleep 2; continue ;;
+            esac
+
+            printf "\n  Starting stress test on %s cores for %s seconds...\n\n" "$CORES" "$DURATION"
+
+            # Show initial temperature
+            TEMP_START=""
+            for tz in /sys/class/thermal/thermal_zone*/temp; do
+                [ -f "$tz" ] || continue
+                T=$(cat "$tz" 2>/dev/null)
+                [ -n "$T" ] && TEMP_START=$((T / 1000))
+                break
+            done
+            [ -n "$TEMP_START" ] && printf "  Start temperature: %s C\n" "$TEMP_START"
+
+            # Launch stress workers
+            PIDS=""
+            I=0
+            while [ "$I" -lt "$CORES" ]; do
+                (
+                    END=$(($(date +%s) + DURATION))
+                    while [ "$(date +%s)" -lt "$END" ]; do
+                        dd if=/dev/urandom of=/dev/null bs=1024 count=1024 2>/dev/null
+                    done
+                ) &
+                PIDS="$PIDS $!"
+                I=$((I + 1))
+            done
+
+            # Monitor progress
+            START_TIME=$(date +%s)
+            FAILED=0
+            while true; do
+                sleep 2
+                ELAPSED=$(( $(date +%s) - START_TIME ))
+                [ "$ELAPSED" -ge "$DURATION" ] && break
+
+                # Check if workers are still running
+                RUNNING=0
+                for PID in $PIDS; do
+                    kill -0 "$PID" 2>/dev/null && RUNNING=$((RUNNING + 1))
+                done
+
+                # Temperature
+                TEMP_NOW=""
+                for tz in /sys/class/thermal/thermal_zone*/temp; do
+                    [ -f "$tz" ] || continue
+                    T=$(cat "$tz" 2>/dev/null)
+                    [ -n "$T" ] && TEMP_NOW=$((T / 1000))
+                    break
+                done
+
+                PCT=$((ELAPSED * 100 / DURATION))
+                if [ -n "$TEMP_NOW" ]; then
+                    printf "\r  [%3d%%] %ds/%ds  Cores active: %s/%s  Temp: %s C    " "$PCT" "$ELAPSED" "$DURATION" "$RUNNING" "$CORES" "$TEMP_NOW"
+                else
+                    printf "\r  [%3d%%] %ds/%ds  Cores active: %s/%s    " "$PCT" "$ELAPSED" "$DURATION" "$RUNNING" "$CORES"
+                fi
+            done
+
+            # Wait for all workers
+            for PID in $PIDS; do
+                wait "$PID" 2>/dev/null
+                RET=$?
+                [ "$RET" -ne 0 ] && FAILED=$((FAILED + 1))
+            done
+
+            printf "\r  [100%%] Complete!                                          \n\n"
+
+            # Final temperature
+            TEMP_END=""
+            for tz in /sys/class/thermal/thermal_zone*/temp; do
+                [ -f "$tz" ] || continue
+                T=$(cat "$tz" 2>/dev/null)
+                [ -n "$T" ] && TEMP_END=$((T / 1000))
+                break
+            done
+            [ -n "$TEMP_END" ] && printf "  End temperature: %s C\n" "$TEMP_END"
+
+            if [ "$FAILED" -eq 0 ]; then
+                printf "  ${GREEN}${BOLD}CPU stress test PASSED - all %s cores completed successfully.${NC}\n" "$CORES"
+            else
+                printf "  ${RED}${BOLD}CPU stress test: %s core(s) exited with errors!${NC}\n" "$FAILED"
+            fi
+            printf "\n  Press Enter..."; read dummy
+            ;;
+        3)
+            printf "\n${BOLD}  Battery Health${NC}\n\n"
+
+            BAT_FOUND=0
+            for BAT in /sys/class/power_supply/BAT*; do
+                [ -d "$BAT" ] || continue
+                BAT_FOUND=1
+                BATNAME=$(basename "$BAT")
+                printf "  ${BOLD}%s:${NC}\n\n" "$BATNAME"
+
+                STATUS=$(cat "$BAT/status" 2>/dev/null)
+                printf "    Status:          %s\n" "${STATUS:-Unknown}"
+
+                # Current charge percentage
+                CAPACITY=$(cat "$BAT/capacity" 2>/dev/null)
+                [ -n "$CAPACITY" ] && printf "    Current charge:  %s%%\n" "$CAPACITY"
+
+                # Design vs current full capacity
+                DESIGN_FULL=$(cat "$BAT/energy_full_design" 2>/dev/null)
+                CURRENT_FULL=$(cat "$BAT/energy_full" 2>/dev/null)
+                ENERGY_UNIT="uWh"
+
+                # Some systems use charge_full instead of energy_full
+                if [ -z "$DESIGN_FULL" ]; then
+                    DESIGN_FULL=$(cat "$BAT/charge_full_design" 2>/dev/null)
+                    CURRENT_FULL=$(cat "$BAT/charge_full" 2>/dev/null)
+                    ENERGY_UNIT="uAh"
+                fi
+
+                if [ -n "$DESIGN_FULL" ] && [ -n "$CURRENT_FULL" ] && [ "$DESIGN_FULL" -gt 0 ] 2>/dev/null; then
+                    DESIGN_MAH=$((DESIGN_FULL / 1000))
+                    CURRENT_MAH=$((CURRENT_FULL / 1000))
+                    printf "    Design capacity: %s mAh\n" "$DESIGN_MAH"
+                    printf "    Current max:     %s mAh\n" "$CURRENT_MAH"
+
+                    # Calculate wear percentage
+                    HEALTH=$((CURRENT_FULL * 100 / DESIGN_FULL))
+                    WEAR=$((100 - HEALTH))
+                    [ "$WEAR" -lt 0 ] && WEAR=0
+
+                    printf "    Wear level:      "
+                    if [ "$WEAR" -le 10 ]; then
+                        printf "${GREEN}%s%% (Excellent)${NC}\n" "$WEAR"
+                    elif [ "$WEAR" -le 20 ]; then
+                        printf "${GREEN}%s%% (Good)${NC}\n" "$WEAR"
+                    elif [ "$WEAR" -le 40 ]; then
+                        printf "${YELLOW}%s%% (Fair)${NC}\n" "$WEAR"
+                    else
+                        printf "${RED}%s%% (Poor - consider replacement)${NC}\n" "$WEAR"
+                    fi
+
+                    printf "    Health:          "
+                    if [ "$HEALTH" -ge 80 ]; then
+                        printf "${GREEN}${BOLD}%s%%${NC}\n" "$HEALTH"
+                    elif [ "$HEALTH" -ge 50 ]; then
+                        printf "${YELLOW}${BOLD}%s%%${NC}\n" "$HEALTH"
+                    else
+                        printf "${RED}${BOLD}%s%%${NC}\n" "$HEALTH"
+                    fi
+                fi
+
+                # Cycle count
+                CYCLES=$(cat "$BAT/cycle_count" 2>/dev/null)
+                if [ -n "$CYCLES" ] && [ "$CYCLES" != "0" ]; then
+                    printf "    Cycle count:     %s\n" "$CYCLES"
+                fi
+
+                # Voltage
+                VOLTAGE=$(cat "$BAT/voltage_now" 2>/dev/null)
+                if [ -n "$VOLTAGE" ]; then
+                    VOLTAGE_V=$(awk "BEGIN {printf \"%.2f\", $VOLTAGE / 1000000}")
+                    printf "    Voltage:         %s V\n" "$VOLTAGE_V"
+                fi
+
+                # Technology
+                TECH=$(cat "$BAT/technology" 2>/dev/null)
+                [ -n "$TECH" ] && printf "    Technology:      %s\n" "$TECH"
+
+                # Manufacturer
+                MANUF=$(cat "$BAT/manufacturer" 2>/dev/null)
+                [ -n "$MANUF" ] && printf "    Manufacturer:    %s\n" "$MANUF"
+
+                printf "\n"
+            done
+
+            if [ "$BAT_FOUND" -eq 0 ]; then
+                printf "  ${YELLOW}No battery detected.${NC}\n"
+                printf "  This may be a desktop or the battery is not recognized.\n"
+            fi
+            printf "  Press Enter..."; read dummy
+            ;;
+        4)
+            clear
+            printf "${YELLOW}  Run: sh /usr/local/bin/toolkit-menu${NC}\n"
+            printf "${CYAN}=== Keyboard Tester ===${NC}\n\n"
+            printf "  Press keys to test them. Each keypress will be shown below.\n"
+            printf "  Type ${BOLD}quit${NC} and press Enter to exit.\n\n"
+            printf "  ${BOLD}Key log:${NC}\n"
+
+            KEYLOG=""
+            COUNT=0
+            while true; do
+                printf "  > "
+                # Read one line at a time (POSIX sh limitation)
+                read KEY
+                [ -z "$KEY" ] && { printf "    [Enter]\n"; continue; }
+                [ "$KEY" = "quit" ] && break
+                COUNT=$((COUNT + 1))
+
+                # Show the key and its hex representation
+                HEX=$(printf '%s' "$KEY" | od -A n -t x1 2>/dev/null | tr -d ' \n')
+                printf "    ${GREEN}#%d: \"%s\"${NC}  (hex: %s)\n" "$COUNT" "$KEY" "$HEX"
+            done
+
+            printf "\n  Total keypresses captured: %s\n" "$COUNT"
+            printf "  Press Enter..."; read dummy
+            ;;
+        5)
+            clear
+            printf "${YELLOW}  Run: sh /usr/local/bin/toolkit-menu${NC}\n"
+            printf "${CYAN}=== Display Test ===${NC}\n\n"
+            printf "  This will fill the screen with color patterns.\n"
+            printf "  Press Enter to cycle through each test.\n\n"
+            printf "  Tests: Red, Green, Blue, White, Black, Color bars\n"
+            printf "  Press Enter to begin..."; read dummy
+
+            # Get terminal size
+            ROWS=$(stty size 2>/dev/null | awk '{print $1}')
+            COLS=$(stty size 2>/dev/null | awk '{print $2}')
+            ROWS=${ROWS:-24}
+            COLS=${COLS:-80}
+
+            # RED screen
+            clear
+            R=0
+            while [ "$R" -lt "$ROWS" ]; do
+                C=0
+                while [ "$C" -lt "$COLS" ]; do
+                    printf "\033[41m "
+                    C=$((C + 1))
+                done
+                R=$((R + 1))
+            done
+            printf "\033[0m\033[1;1H\033[1;37mRED - Press Enter...\033[0m"
+            read dummy
+
+            # GREEN screen
+            clear
+            R=0
+            while [ "$R" -lt "$ROWS" ]; do
+                C=0
+                while [ "$C" -lt "$COLS" ]; do
+                    printf "\033[42m "
+                    C=$((C + 1))
+                done
+                R=$((R + 1))
+            done
+            printf "\033[0m\033[1;1H\033[1;30mGREEN - Press Enter...\033[0m"
+            read dummy
+
+            # BLUE screen
+            clear
+            R=0
+            while [ "$R" -lt "$ROWS" ]; do
+                C=0
+                while [ "$C" -lt "$COLS" ]; do
+                    printf "\033[44m "
+                    C=$((C + 1))
+                done
+                R=$((R + 1))
+            done
+            printf "\033[0m\033[1;1H\033[1;37mBLUE - Press Enter...\033[0m"
+            read dummy
+
+            # WHITE screen
+            clear
+            R=0
+            while [ "$R" -lt "$ROWS" ]; do
+                C=0
+                while [ "$C" -lt "$COLS" ]; do
+                    printf "\033[47m "
+                    C=$((C + 1))
+                done
+                R=$((R + 1))
+            done
+            printf "\033[0m\033[1;1H\033[1;30mWHITE - Press Enter...\033[0m"
+            read dummy
+
+            # BLACK screen
+            clear
+            R=0
+            while [ "$R" -lt "$ROWS" ]; do
+                C=0
+                while [ "$C" -lt "$COLS" ]; do
+                    printf "\033[40m "
+                    C=$((C + 1))
+                done
+                R=$((R + 1))
+            done
+            printf "\033[0m\033[1;1H\033[1;37mBLACK - Press Enter...\033[0m"
+            read dummy
+
+            # Color bars (vertical stripes)
+            clear
+            STRIPE=$((COLS / 7))
+            [ "$STRIPE" -lt 1 ] && STRIPE=1
+            R=0
+            while [ "$R" -lt "$ROWS" ]; do
+                C=0
+                while [ "$C" -lt "$COLS" ]; do
+                    BAR=$((C / STRIPE))
+                    case "$BAR" in
+                        0) printf "\033[41m " ;;
+                        1) printf "\033[43m " ;;
+                        2) printf "\033[42m " ;;
+                        3) printf "\033[46m " ;;
+                        4) printf "\033[44m " ;;
+                        5) printf "\033[45m " ;;
+                        *) printf "\033[47m " ;;
+                    esac
+                    C=$((C + 1))
+                done
+                R=$((R + 1))
+            done
+            printf "\033[0m\033[1;1H\033[1;37mCOLOR BARS - Press Enter...\033[0m"
+            read dummy
+
+            # Gradient (grayscale using 256-color mode)
+            clear
+            R=0
+            while [ "$R" -lt "$ROWS" ]; do
+                C=0
+                while [ "$C" -lt "$COLS" ]; do
+                    # Map column to grayscale (232-255 = 24 shades of gray)
+                    SHADE=$((C * 23 / COLS + 232))
+                    printf "\033[48;5;%dm " "$SHADE"
+                    C=$((C + 1))
+                done
+                R=$((R + 1))
+            done
+            printf "\033[0m\033[1;1H\033[1;37mGRADIENT - Press Enter...\033[0m"
+            read dummy
+
+            printf "\033[0m"
+            clear
+            printf "  ${GREEN}Display test complete.${NC}\n"
+            printf "  Press Enter..."; read dummy
+            ;;
+        6)
+            clear
+            printf "${YELLOW}  Run: sh /usr/local/bin/toolkit-menu${NC}\n"
+            printf "${CYAN}=== Temperature Monitor ===${NC}\n\n"
+            printf "  Refreshing every 2 seconds. Press Ctrl+C to stop.\n\n"
+
+            # Use trap to handle clean exit
+            trap "break" INT TERM
+
+            while true; do
+                # Move cursor to line 5 for refresh
+                printf "\033[5;1H\033[J"
+
+                printf "  ${BOLD}CPU / System Temperatures:${NC}\n\n"
+
+                FOUND_TEMP=0
+                for tz in /sys/class/thermal/thermal_zone*; do
+                    [ -d "$tz" ] || continue
+                    TZNAME=$(cat "$tz/type" 2>/dev/null)
+                    TZTEMP=$(cat "$tz/temp" 2>/dev/null)
+                    [ -z "$TZTEMP" ] && continue
+                    FOUND_TEMP=1
+                    TEMP_C=$((TZTEMP / 1000))
+                    TEMP_FRAC=$(( (TZTEMP % 1000) / 100 ))
+
+                    # Color code temperature
+                    if [ "$TEMP_C" -ge 90 ]; then
+                        COLOR="$RED"
+                    elif [ "$TEMP_C" -ge 70 ]; then
+                        COLOR="$YELLOW"
+                    else
+                        COLOR="$GREEN"
+                    fi
+                    printf "    %-20s ${COLOR}%d.%d C${NC}\n" "${TZNAME:-zone}" "$TEMP_C" "$TEMP_FRAC"
+                done
+
+                [ "$FOUND_TEMP" -eq 0 ] && printf "    ${YELLOW}No thermal zones found in /sys/class/thermal/${NC}\n"
+
+                # Disk temperatures via smartctl
+                printf "\n  ${BOLD}Disk Temperatures:${NC}\n\n"
+                FOUND_DISK_TEMP=0
+                if command -v smartctl >/dev/null 2>&1; then
+                    for disk in /sys/block/sd* /sys/block/nvme*; do
+                        [ -e "$disk" ] || continue
+                        NAME=$(basename "$disk")
+                        SIZE=$(cat "$disk/size" 2>/dev/null)
+                        [ -z "$SIZE" ] || [ "$SIZE" = "0" ] && continue
+                        MODEL=$(cat "$disk/device/model" 2>/dev/null | sed 's/ *$//')
+
+                        DTEMP=$(smartctl -A "/dev/$NAME" 2>/dev/null | grep -i "temperature" | head -1 | awk '{print $NF}')
+                        if [ -n "$DTEMP" ]; then
+                            FOUND_DISK_TEMP=1
+                            if [ "$DTEMP" -ge 55 ] 2>/dev/null; then
+                                COLOR="$RED"
+                            elif [ "$DTEMP" -ge 45 ] 2>/dev/null; then
+                                COLOR="$YELLOW"
+                            else
+                                COLOR="$GREEN"
+                            fi
+                            printf "    /dev/%-12s ${COLOR}%s C${NC}  %s\n" "$NAME" "$DTEMP" "$MODEL"
+                        fi
+                    done
+                fi
+                # Also check hwmon for disk temps
+                for hwmon in /sys/class/hwmon/hwmon*; do
+                    [ -d "$hwmon" ] || continue
+                    HNAME=$(cat "$hwmon/name" 2>/dev/null)
+                    for tinput in "$hwmon"/temp*_input; do
+                        [ -f "$tinput" ] || continue
+                        TVAL=$(cat "$tinput" 2>/dev/null)
+                        [ -z "$TVAL" ] && continue
+                        TC=$((TVAL / 1000))
+                        TLABEL_FILE=$(echo "$tinput" | sed 's/_input$/_label/')
+                        TLABEL=$(cat "$TLABEL_FILE" 2>/dev/null)
+                        TLABEL="${TLABEL:-$HNAME}"
+
+                        # Skip if already shown via thermal_zone
+                        case "$TLABEL" in *CPU*|*cpu*|*Core*|*core*) continue ;; esac
+
+                        FOUND_DISK_TEMP=1
+                        if [ "$TC" -ge 55 ] 2>/dev/null; then
+                            COLOR="$RED"
+                        elif [ "$TC" -ge 45 ] 2>/dev/null; then
+                            COLOR="$YELLOW"
+                        else
+                            COLOR="$GREEN"
+                        fi
+                        printf "    %-20s ${COLOR}%d C${NC}\n" "$TLABEL" "$TC"
+                    done
+                done
+
+                [ "$FOUND_DISK_TEMP" -eq 0 ] && printf "    ${YELLOW}No disk temperature data available.${NC}\n"
+
+                printf "\n  ${CYAN}[Refreshing in 2s... Ctrl+C to stop]${NC}"
+                sleep 2 || break
+            done
+
+            trap - INT TERM
+            printf "\n\n  Press Enter..."; read dummy
+            ;;
+        0) break ;;
+    esac
+done

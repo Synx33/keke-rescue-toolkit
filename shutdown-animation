@@ -1,0 +1,72 @@
+#!/bin/sh
+BG=$(printf '\033[1;32m')
+G=$(printf '\033[0;32m')
+DG=$(printf '\033[2;32m')
+R=$(printf '\033[0;31m')
+N=$(printf '\033[0m')
+
+COLS=$(stty size 2>/dev/null | awk '{print $2}')
+ROWS=$(stty size 2>/dev/null | awk '{print $1}')
+[ -z "$COLS" ] && COLS=80
+[ -z "$ROWS" ] && ROWS=24
+
+printf '\033[?25l'
+
+center() {
+    PLAIN=$(printf "%s" "$1" | sed 's/\x1b\[[0-9;]*m//g')
+    LEN=${#PLAIN}
+    PAD=$(( (COLS - LEN) / 2 ))
+    [ "$PAD" -lt 0 ] && PAD=0
+    SPACES=""
+    I=0; while [ $I -lt $PAD ]; do SPACES="${SPACES} "; I=$((I+1)); done
+    printf "%s%s\n" "$SPACES" "$1"
+}
+
+VPAD=$(( (ROWS - 10) / 2 ))
+[ "$VPAD" -lt 1 ] && VPAD=1
+vpad() { I=0; while [ $I -lt $VPAD ]; do printf "\n"; I=$((I+1)); done; }
+
+G1=" ██████╗  ██████╗  ██████╗ ██████╗ ██████╗ ██╗   ██╗███████╗"
+G2="██╔════╝ ██╔═══██╗██╔═══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝██╔════╝"
+G3="██║  ███╗██║   ██║██║   ██║██║  ██║██████╔╝ ╚████╔╝ █████╗  "
+G4="██║   ██║██║   ██║██║   ██║██║  ██║██╔══██╗  ╚██╔╝  ██╔══╝  "
+G5="╚██████╔╝╚██████╔╝╚██████╔╝██████╔╝██████╔╝   ██║   ███████╗"
+G6=" ╚═════╝  ╚═════╝  ╚═════╝ ╚═════╝ ╚═════╝    ╚═╝   ╚══════╝"
+
+# Stage 1: Bright goodbye + disconnect
+clear; vpad
+center "${BG}${G1}${N}"
+center "${BG}${G2}${N}"
+center "${BG}${G3}${N}"
+center "${BG}${G4}${N}"
+center "${BG}${G5}${N}"
+center "${BG}${G6}${N}"
+printf "\n"
+center "${R}USB Disconnected${N}"
+sleep 0.8
+
+# Stage 2: Normal
+clear; vpad
+center "${G}${G1}${N}"
+center "${G}${G2}${N}"
+center "${G}${G3}${N}"
+center "${G}${G4}${N}"
+center "${G}${G5}${N}"
+center "${G}${G6}${N}"
+sleep 0.8
+
+# Stage 3: Dim
+clear; vpad
+center "${DG}${G1}${N}"
+center "${DG}${G2}${N}"
+center "${DG}${G3}${N}"
+center "${DG}${G4}${N}"
+center "${DG}${G5}${N}"
+center "${DG}${G6}${N}"
+sleep 0.8
+
+# Stage 4: Black
+clear
+sleep 0.5
+
+printf '\033[?25h'

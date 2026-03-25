@@ -1,0 +1,324 @@
+#!/bin/sh
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+show_disks() {
+    printf "\n${BOLD}  Disks:${NC}\n\n"
+    DNUM=0
+    DISKS=""
+    for disk in /sys/block/sd* /sys/block/nvme* /sys/block/mmcblk*; do
+        [ -e "$disk" ] || continue
+        NAME=$(basename "$disk")
+        SIZE=$(cat "$disk/size" 2>/dev/null)
+        [ -z "$SIZE" ] || [ "$SIZE" = "0" ] && continue
+        SIZE_GB=$(awk "BEGIN {printf \"%.1f\", $SIZE * 512 / 1073741824}")
+        MODEL=$(cat "$disk/device/model" 2>/dev/null | sed 's/ *$//')
+        [ -z "$MODEL" ] && MODEL=$(cat "$disk/device/name" 2>/dev/null | sed 's/ *$//')
+        DNUM=$((DNUM+1))
+        DISKS="$DISKS /dev/$NAME"
+        printf "    ${BOLD}%d) /dev/%s${NC}  %s GB  %s\n" "$DNUM" "$NAME" "$SIZE_GB" "$MODEL"
+
+        # Show partitions
+        BLKOUT=$(blkid 2>/dev/null)
+        for pdev in /sys/block/$NAME/${NAME}*; do
+            [ -e "$pdev" ] || continue
+            PNAME=$(basename "$pdev")
+            PSIZE=$(cat "$pdev/size" 2>/dev/null)
+            [ -z "$PSIZE" ] || [ "$PSIZE" = "0" ] && continue
+            PSIZE_GB=$(awk "BEGIN {printf \"%.1f\", $PSIZE * 512 / 1073741824}")
+            LABEL=$(echo "$BLKOUT" | grep "^/dev/${PNAME}:" | sed -n 's/.*LABEL="\([^"]*\)".*/\1/p')
+            TYPE=$(echo "$BLKOUT" | grep "^/dev/${PNAME}:" | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')
+            MOUNTED=""
+            mount | grep -q "^/dev/${PNAME} " && MOUNTED=" ${GREEN}[mounted]${NC}"
+            printf "       /dev/%s  %s GB  %s  [%s]%s\n" "$PNAME" "$PSIZE_GB" "${LABEL:-}" "${TYPE:-unknown}" "$MOUNTED"
+        done
+        printf "\n"
+    done
+}
+
+pick_disk() {
+    printf "  Enter disk (e.g. /dev/sda): "; read DISK
+    [ -b "$DISK" ] && printf "%s" "$DISK" && return 0
+    printf "${RED}  Not a valid device.${NC}\n"
+    return 1
+}
+
+pick_partition() {
+    printf "  Enter partition (e.g. /dev/sda1): "; read PART
+    [ -b "$PART" ] && printf "%s" "$PART" && return 0
+    printf "${RED}  Not a valid device.${NC}\n"
+    return 1
+}
+
+mount_partition() {
+    PART="$1"
+    MNTPT="/mnt/$(basename $PART)"
+    mkdir -p "$MNTPT"
+    TYPE=$(blkid "$PART" 2>/dev/null | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')
+    case "$TYPE" in
+        ntfs)
+            if [ -x /bin/ntfs-3g ]; then
+                /bin/ntfs-3g -o rw,remove_hiberfile "$PART" "$MNTPT" 2>&1
+            else
+                mount -t ntfs3 -o rw,force "$PART" "$MNTPT" 2>&1
+            fi
+            ;;
+        *) mount "$PART" "$MNTPT" 2>&1 ;;
+    esac
+    printf "  Mounted at %s\n" "$MNTPT"
+}
+
+while true; do
+    clear
+    printf "${YELLOW}  Run: sh /usr/local/bin/toolkit-menu${NC}\n"
+    printf "${CYAN}=== Disk Management ===${NC}\n"
+    show_disks
+    printf "  ${BOLD}Options:${NC}\n\n"
+    printf "    ${BOLD}1)${NC} Disk health report\n"
+    printf "    ${BOLD}2)${NC} Mount a partition\n"
+    printf "    ${BOLD}3)${NC} Unmount a partition\n"
+    printf "    ${BOLD}4)${NC} Disk read speed test\n"
+    printf "    ${BOLD}5)${NC} Check filesystem for errors\n"
+    printf "    ${BOLD}6)${NC} View SMART data (detailed)\n"
+    printf "    ${BOLD}7)${NC} Wipe disk (DANGEROUS)\n"
+    printf "    ${BOLD}0)${NC} Back to main menu\n"
+    printf "\n  Choose: "; read CH
+
+    case "$CH" in
+        1)
+            printf "\n${BOLD}  Disk Health Report${NC}\n\n"
+            for disk in /sys/block/sd* /sys/block/nvme*; do
+                [ -e "$disk" ] || continue
+                NAME=$(basename "$disk")
+                DEV="/dev/$NAME"
+                SIZE=$(cat "$disk/size" 2>/dev/null)
+                [ -z "$SIZE" ] || [ "$SIZE" = "0" ] && continue
+                SIZE_GB=$(awk "BEGIN {printf \"%.1f\", $SIZE * 512 / 1073741824}")
+                MODEL=$(cat "$disk/device/model" 2>/dev/null | sed 's/ *$//')
+
+                printf "  ${BOLD}%s${NC} - %s (%s GB)\n" "$DEV" "$MODEL" "$SIZE_GB"
+
+                if command -v smartctl >/dev/null 2>&1; then
+                    SMART_ALL=$(smartctl -a "$DEV" 2>/dev/null)
+                    SMART_ATTRS=$(smartctl -A "$DEV" 2>/dev/null)
+                    SMART_HEALTH=$(smartctl -H "$DEV" 2>/dev/null)
+
+                    # Overall health status - check multiple output formats
+                    HEALTH_OK=0
+                    HEALTH_FAIL=0
+                    # SATA drives: "test result: PASSED"
+                    echo "$SMART_HEALTH" | grep -qi "PASSED" && HEALTH_OK=1
+                    echo "$SMART_HEALTH" | grep -qi "OK" && HEALTH_OK=1
+                    echo "$SMART_HEALTH" | grep -qi "FAILED" && HEALTH_FAIL=1
+                    # NVMe: check Critical Warning field
+                    CRIT_WARN=$(echo "$SMART_ALL" | grep -i "Critical Warning" | awk '{print $NF}')
+                    if [ -n "$CRIT_WARN" ]; then
+                        if [ "$CRIT_WARN" = "0x00" ] || [ "$CRIT_WARN" = "0" ]; then
+                            HEALTH_OK=1
+                        else
+                            HEALTH_FAIL=1
+                        fi
+                    fi
+                    # If smartctl returned data at all but no clear pass/fail, assume OK
+                    if [ "$HEALTH_OK" -eq 0 ] && [ "$HEALTH_FAIL" -eq 0 ]; then
+                        echo "$SMART_ALL" | grep -qi "SMART" && HEALTH_OK=1
+                    fi
+
+                    if [ "$HEALTH_FAIL" -eq 1 ]; then
+                        printf "    Overall health: ${RED}FAILED${NC}\n"
+                    elif [ "$HEALTH_OK" -eq 1 ]; then
+                        printf "    Overall health: ${GREEN}PASSED${NC}\n"
+                    else
+                        printf "    Overall health: ${YELLOW}Could not read SMART data${NC}\n"
+                    fi
+
+                    # Detect SSD vs HDD (rotation rate 0 = SSD)
+                    IS_SSD=0
+                    echo "$SMART_ALL" | grep -qi "Solid State\|SSD" && IS_SSD=1
+                    ROTATION=$(echo "$SMART_ALL" | grep -i "Rotation Rate" | head -1)
+                    echo "$ROTATION" | grep -qi "Solid State" && IS_SSD=1
+
+                    # Temperature
+                    TEMP=$(echo "$SMART_ATTRS" | grep -i "temperature" | head -1 | awk '{print $NF}')
+                    [ -n "$TEMP" ] && printf "    Temperature:    %s C\n" "$TEMP"
+
+                    # Power-on hours
+                    HOURS=$(echo "$SMART_ATTRS" | grep -i "Power_On_Hours" | awk '{print $NF}')
+                    [ -n "$HOURS" ] && printf "    Power-on hours: %s\n" "$HOURS"
+
+                    # Bad sectors: reallocated + pending
+                    REALLOCATED=$(echo "$SMART_ATTRS" | grep -i "Reallocated_Sector_Ct" | awk '{print $NF}')
+                    PENDING=$(echo "$SMART_ATTRS" | grep -i "Current_Pending_Sector" | awk '{print $NF}')
+                    UNCORRECT=$(echo "$SMART_ATTRS" | grep -i "Offline_Uncorrectable" | awk '{print $NF}')
+                    REALLOCATED=${REALLOCATED:-0}
+                    PENDING=${PENDING:-0}
+                    UNCORRECT=${UNCORRECT:-0}
+                    BAD_TOTAL=$((REALLOCATED + PENDING))
+                    if [ "$BAD_TOTAL" -eq 0 ] 2>/dev/null; then
+                        printf "    Bad sectors:    ${GREEN}0${NC} (reallocated: %s, pending: %s)\n" "$REALLOCATED" "$PENDING"
+                    else
+                        printf "    Bad sectors:    ${RED}%s${NC} (reallocated: %s, pending: %s)\n" "$BAD_TOTAL" "$REALLOCATED" "$PENDING"
+                    fi
+
+                    # Health score percentage
+                    if [ "$IS_SSD" -eq 1 ]; then
+                        # SSD: use Wear_Leveling_Count or Media_Wearout_Indicator (VALUE column = remaining %)
+                        WEAR_VAL=$(echo "$SMART_ATTRS" | grep -iE "Wear_Leveling_Count|Media_Wearout_Indicator|Wear_Leveling" | awk '{print $4}' | head -1)
+                        # Also try Percentage_Used from NVMe
+                        if [ -z "$WEAR_VAL" ]; then
+                            PCT_USED=$(echo "$SMART_ALL" | grep -i "Percentage Used" | awk '{print $NF}' | tr -d '%')
+                            [ -n "$PCT_USED" ] && WEAR_VAL=$((100 - PCT_USED))
+                        fi
+                        if [ -n "$WEAR_VAL" ] && [ "$WEAR_VAL" -ge 0 ] 2>/dev/null; then
+                            printf "    SSD wear level: %s%% remaining\n" "$WEAR_VAL"
+                            SCORE="$WEAR_VAL"
+                        else
+                            # Fallback: if health passed and no wear info, assume good
+                            if [ "$HEALTH_OK" -eq 1 ]; then
+                                SCORE=95
+                            else
+                                SCORE=50
+                            fi
+                        fi
+                        # Color the score
+                        if [ "$SCORE" -ge 70 ] 2>/dev/null; then
+                            printf "    ${GREEN}${BOLD}Health score:   %s%%${NC}\n" "$SCORE"
+                        elif [ "$SCORE" -ge 40 ] 2>/dev/null; then
+                            printf "    ${YELLOW}${BOLD}Health score:   %s%%${NC}\n" "$SCORE"
+                        else
+                            printf "    ${RED}${BOLD}Health score:   %s%%${NC}\n" "$SCORE"
+                        fi
+                    else
+                        # HDD: calculate from bad sectors and health status
+                        SCORE=100
+                        # Deduct for reallocated sectors (each one -2%, max -40%)
+                        if [ "$REALLOCATED" -gt 0 ] 2>/dev/null; then
+                            DEDUCT=$((REALLOCATED * 2))
+                            [ "$DEDUCT" -gt 40 ] && DEDUCT=40
+                            SCORE=$((SCORE - DEDUCT))
+                        fi
+                        # Deduct for pending sectors (each one -5%, max -30%)
+                        if [ "$PENDING" -gt 0 ] 2>/dev/null; then
+                            DEDUCT=$((PENDING * 5))
+                            [ "$DEDUCT" -gt 30 ] && DEDUCT=30
+                            SCORE=$((SCORE - DEDUCT))
+                        fi
+                        # Deduct for uncorrectable errors (each one -5%, max -20%)
+                        if [ "$UNCORRECT" -gt 0 ] 2>/dev/null; then
+                            DEDUCT=$((UNCORRECT * 5))
+                            [ "$DEDUCT" -gt 20 ] && DEDUCT=20
+                            SCORE=$((SCORE - DEDUCT))
+                        fi
+                        # If SMART overall failed, cap at 20%
+                        [ "$HEALTH_FAIL" -eq 1 ] && [ "$SCORE" -gt 20 ] && SCORE=20
+                        [ "$SCORE" -lt 0 ] && SCORE=0
+                        # Color the score
+                        if [ "$SCORE" -ge 70 ] 2>/dev/null; then
+                            printf "    ${GREEN}${BOLD}Health score:   %s%%${NC}\n" "$SCORE"
+                        elif [ "$SCORE" -ge 40 ] 2>/dev/null; then
+                            printf "    ${YELLOW}${BOLD}Health score:   %s%%${NC}\n" "$SCORE"
+                        else
+                            printf "    ${RED}${BOLD}Health score:   %s%%${NC}\n" "$SCORE"
+                        fi
+                    fi
+                else
+                    # No smartctl - basic check from kernel
+                    ERRORS=$(cat /sys/block/$NAME/device/errors 2>/dev/null)
+                    if [ -n "$ERRORS" ] && [ "$ERRORS" != "0" ]; then
+                        printf "    ${RED}Disk errors detected: %s${NC}\n" "$ERRORS"
+                    else
+                        printf "    ${GREEN}No kernel-reported errors${NC}\n"
+                    fi
+                    printf "    ${YELLOW}Install smartmontools for detailed health: apk add smartmontools${NC}\n"
+                fi
+                printf "\n"
+            done
+            printf "  Press Enter..."; read dummy
+            ;;
+        2)
+            printf "\n"
+            PART=$(pick_partition) || { sleep 2; continue; }
+            mount_partition "$PART"
+            printf "\n  Press Enter..."; read dummy
+            ;;
+        3)
+            printf "\n  Currently mounted:\n"
+            mount | grep -E "^/dev/sd|^/dev/nvme|^/dev/mmc|ntfs-3g" | while read line; do
+                DEV=$(echo "$line" | awk '{print $1}')
+                MNT=$(echo "$line" | awk '{print $3}')
+                printf "    %s -> %s\n" "$DEV" "$MNT"
+            done
+            printf "\n  Enter mount point to unmount: "; read UMNT
+            [ -n "$UMNT" ] && umount "$UMNT" 2>&1 && printf "  ${GREEN}Unmounted.${NC}\n"
+            printf "\n  Press Enter..."; read dummy
+            ;;
+        4)
+            printf "\n"
+            DISK=$(pick_disk) || { sleep 2; continue; }
+            printf "\n  Testing read speed on %s (reading 100MB)...\n\n" "$DISK"
+            dd if="$DISK" of=/dev/null bs=1M count=100 2>&1 | tail -1
+            printf "\n  Press Enter..."; read dummy
+            ;;
+        5)
+            printf "\n  ${YELLOW}Filesystem check (partition must be unmounted)${NC}\n"
+            PART=$(pick_partition) || { sleep 2; continue; }
+            TYPE=$(blkid "$PART" 2>/dev/null | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')
+            printf "  Filesystem: %s\n" "$TYPE"
+            case "$TYPE" in
+                ntfs)
+                    if command -v ntfsfix >/dev/null 2>&1; then
+                        printf "  Running ntfsfix...\n\n"
+                        ntfsfix "$PART" 2>&1
+                    else
+                        printf "  ${YELLOW}ntfsfix not available.${NC}\n"
+                    fi
+                    ;;
+                ext*)
+                    printf "  Running e2fsck...\n\n"
+                    e2fsck -f -y "$PART" 2>&1
+                    ;;
+                vfat|fat32)
+                    printf "  Running fsck.vfat...\n\n"
+                    fsck.vfat -a "$PART" 2>&1
+                    ;;
+                *)
+                    printf "  ${YELLOW}No checker available for %s${NC}\n" "$TYPE"
+                    ;;
+            esac
+            printf "\n  Press Enter..."; read dummy
+            ;;
+        6)
+            printf "\n"
+            DISK=$(pick_disk) || { sleep 2; continue; }
+            if command -v smartctl >/dev/null 2>&1; then
+                smartctl -a "$DISK" 2>&1 | more
+            else
+                printf "  ${YELLOW}smartctl not installed.${NC}\n"
+                printf "  Install with: apk add smartmontools\n"
+                # Show what we can
+                hdparm -I "$DISK" 2>/dev/null | head -30
+            fi
+            printf "\n  Press Enter..."; read dummy
+            ;;
+        7)
+            printf "\n${RED}  WARNING: This will PERMANENTLY DESTROY all data!${NC}\n\n"
+            DISK=$(pick_disk) || { sleep 2; continue; }
+            SIZE=$(cat /sys/block/$(basename $DISK)/size 2>/dev/null)
+            SIZE_GB=$(awk "BEGIN {printf \"%.1f\", $SIZE * 512 / 1073741824}")
+            printf "  Disk: %s (%s GB)\n" "$DISK" "$SIZE_GB"
+            printf "\n  ${RED}Type ERASE to confirm:${NC} "; read CONF
+            if [ "$CONF" = "ERASE" ]; then
+                printf "  Wiping partition table and first 100MB...\n"
+                dd if=/dev/zero of="$DISK" bs=1M count=100 2>&1 | tail -1
+                sync
+                printf "\n  ${GREEN}Disk wiped. Partition table destroyed.${NC}\n"
+            else
+                printf "  Aborted.\n"
+            fi
+            printf "\n  Press Enter..."; read dummy
+            ;;
+        0) break ;;
+    esac
+done

@@ -1,0 +1,178 @@
+#!/bin/sh
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+clear
+printf "${YELLOW}  Run: sh /usr/local/bin/toolkit-menu${NC}\n"
+printf "${CYAN}"
+printf "==============================================\n"
+printf "   Windows 11 Microsoft Account Bypass        \n"
+printf "==============================================\n"
+printf "${NC}\n"
+printf "  Removes Microsoft account requirement from\n"
+printf "  Windows 11 setup and settings.\n\n"
+
+# ---- Find and mount Windows partition ----
+printf "${GREEN}[1/3] Finding Windows partition...${NC}\n"
+BLKOUT=$(blkid 2>/dev/null)
+PARTS=""; COUNT=0
+for p in /dev/sd*[0-9] /dev/nvme*p[0-9]* /dev/mmcblk*p[0-9]*; do
+    [ -b "$p" ] || continue
+    echo "$BLKOUT" | grep "^${p}:" | grep -q 'TYPE="ntfs"' || continue
+    PARTS="$PARTS $p"; COUNT=$((COUNT+1))
+done
+
+if [ "$COUNT" -eq 0 ]; then
+    printf "${RED}No NTFS partitions found.${NC}\n"
+    printf "\nPress Enter..."; read dummy; exit 1
+fi
+
+printf "\nFound NTFS partitions:\n"
+I=0
+for p in $PARTS; do
+    LABEL=$(echo "$BLKOUT" | grep "^${p}:" | sed -n 's/.*LABEL="\([^"]*\)".*/\1/p')
+    printf "  [%d] %s  (%s)\n" "$I" "$p" "${LABEL:-unknown}"; I=$((I+1))
+done
+printf "\n"
+
+if [ "$COUNT" -eq 1 ]; then
+    CHOSEN=$(printf '%s' "$PARTS" | tr -d ' ')
+    printf "Auto-selected: %s\n" "$CHOSEN"
+else
+    printf "Select partition: "; read PNUM
+    I=0; for p in $PARTS; do [ "$I" -eq "$PNUM" ] && CHOSEN="$p" && break; I=$((I+1)); done
+fi
+[ -z "$CHOSEN" ] && printf "${RED}Invalid.${NC}\n" && exit 1
+
+printf "\n${GREEN}[2/3] Mounting %s...${NC}\n" "$CHOSEN"
+MNT=$(mktemp -d)
+if [ -x /bin/ntfs-3g ]; then
+    /bin/ntfs-3g -o rw,remove_hiberfile "$CHOSEN" "$MNT" 2>/dev/null
+else
+    mount -t ntfs3 -o rw,force "$CHOSEN" "$MNT" 2>/dev/null
+fi
+
+# Find SOFTWARE hive
+SOFTWARE=""
+for s in "$MNT/Windows/System32/config/SOFTWARE" "$MNT/windows/system32/config/SOFTWARE" \
+         "$MNT/WINDOWS/system32/config/SOFTWARE" "$MNT/Windows/System32/config/software"; do
+    [ -f "$s" ] && SOFTWARE="$s" && break
+done
+
+if [ -z "$SOFTWARE" ]; then
+    printf "${RED}Could not find SOFTWARE registry hive.${NC}\n"
+    umount "$MNT" 2>/dev/null; rmdir "$MNT"; exit 1
+fi
+printf "Found registry at: %s\n" "$SOFTWARE"
+
+# Verify write access
+touch "$MNT/.write_test" 2>/dev/null && rm -f "$MNT/.write_test" 2>/dev/null && \
+    printf "${GREEN}Write access confirmed.${NC}\n" || \
+    printf "${RED}WARNING: Read-only!${NC}\n"
+
+# ---- Menu ----
+printf "\n${BOLD}${CYAN}========== OPTIONS ==========${NC}\n\n"
+printf "  ${BOLD}1)${NC} Bypass Microsoft account in Windows setup (OOBE)\n"
+printf "     ${YELLOW}Use this during fresh install / reset${NC}\n"
+printf "  ${BOLD}2)${NC} Disable Microsoft account nags in Settings\n"
+printf "     ${YELLOW}Stops 'Finish setting up' and 'Use Microsoft account' prompts${NC}\n"
+printf "  ${BOLD}3)${NC} Do BOTH (recommended)\n"
+printf "  ${BOLD}0)${NC} Back\n"
+printf "\n  Choose [3]: "; read OPT; OPT=${OPT:-3}
+
+do_oobe_bypass() {
+    printf "\n${GREEN}  Applying OOBE bypass...${NC}\n"
+
+    if command -v chntpw >/dev/null 2>&1; then
+        # Method 1: Use chntpw to edit SOFTWARE registry
+        # Navigate to OOBE key and set BypassNRO = 1
+        printf "cd \\Microsoft\\Windows\\CurrentVersion\\OOBE\nnv 4 BypassNRO\ned BypassNRO\n1\nq\ny\n" | \
+            chntpw -e "$SOFTWARE" 2>&1 | grep -iE "value|written|error|changed" | head -5
+
+        # Also set other OOBE bypass keys
+        printf "cd \\Microsoft\\Windows\\CurrentVersion\\OOBE\nnv 4 SkipMachineOOBE\ned SkipMachineOOBE\n1\nq\ny\n" | \
+            chntpw -e "$SOFTWARE" 2>/dev/null
+
+        printf "cd \\Microsoft\\Windows\\CurrentVersion\\OOBE\nnv 4 SkipUserOOBE\ned SkipUserOOBE\n1\nq\ny\n" | \
+            chntpw -e "$SOFTWARE" 2>/dev/null
+    fi
+
+    # Method 2: Also create the autounattend trigger file
+    # This file in System32 tells OOBE to allow local account
+    SCRIPTS_DIR="$MNT/Windows/Setup/Scripts"
+    mkdir -p "$SCRIPTS_DIR" 2>/dev/null
+    printf "@echo off\r\nreg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE /v BypassNRO /t REG_DWORD /d 1 /f\r\n" \
+        > "$SCRIPTS_DIR/SetupComplete.cmd"
+
+    # Method 3: Drop the bypass batch that can be run from Shift+F10
+    printf "@echo off\r\nreg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE /v BypassNRO /t REG_DWORD /d 1 /f\r\nshutdown /r /t 0\r\n" \
+        > "$MNT/Windows/System32/bypassnro.bat" 2>/dev/null
+
+    printf "  ${GREEN}OOBE bypass applied!${NC}\n"
+    printf "  During Windows setup, you will see 'I don't have internet'\n"
+    printf "  option which lets you create a local account.\n"
+}
+
+do_nag_disable() {
+    printf "\n${GREEN}  Disabling Microsoft account nags...${NC}\n"
+
+    if command -v chntpw >/dev/null 2>&1; then
+        # Disable 'Finish setting up your device' notifications
+        printf "cd \\Microsoft\\Windows\\CurrentVersion\\UserProfileEngagement\nnv 4 ScoobeSystemSettingEnabled\ned ScoobeSystemSettingEnabled\n0\nq\ny\n" | \
+            chntpw -e "$SOFTWARE" 2>/dev/null
+
+        # Disable 'Get even more out of Windows' nag
+        printf "cd \\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager\nnv 4 SubscribedContent-310093Enabled\ned SubscribedContent-310093Enabled\n0\nq\ny\n" | \
+            chntpw -e "$SOFTWARE" 2>/dev/null
+
+        printf "cd \\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager\nnv 4 SubscribedContent-338389Enabled\ned SubscribedContent-338389Enabled\n0\nq\ny\n" | \
+            chntpw -e "$SOFTWARE" 2>/dev/null
+
+        # Disable forced Microsoft sign-in prompts
+        printf "cd \\Microsoft\\Windows\\CurrentVersion\\Policies\\System\nnv 4 NoConnectedUser\ned NoConnectedUser\n3\nq\ny\n" | \
+            chntpw -e "$SOFTWARE" 2>/dev/null
+
+        # Allow local account usage
+        printf "cd \\Microsoft\\Windows\\CurrentVersion\\Policies\\System\nnv 4 BlockMicrosoftAccountSignIn\ned BlockMicrosoftAccountSignIn\n0\nq\ny\n" | \
+            chntpw -e "$SOFTWARE" 2>/dev/null
+    fi
+
+    # Also set via SetupComplete for persistence after updates
+    SCRIPTS_DIR="$MNT/Windows/Setup/Scripts"
+    mkdir -p "$SCRIPTS_DIR" 2>/dev/null
+    printf "@echo off\r\n" > "$SCRIPTS_DIR/DisableNags.cmd"
+    printf "reg add \"HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\UserProfileEngagement\" /v ScoobeSystemSettingEnabled /t REG_DWORD /d 0 /f\r\n" >> "$SCRIPTS_DIR/DisableNags.cmd"
+    printf "reg add \"HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager\" /v SubscribedContent-310093Enabled /t REG_DWORD /d 0 /f\r\n" >> "$SCRIPTS_DIR/DisableNags.cmd"
+    printf "reg add \"HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager\" /v SubscribedContent-338389Enabled /t REG_DWORD /d 0 /f\r\n" >> "$SCRIPTS_DIR/DisableNags.cmd"
+
+    # Place in startup too
+    STARTUP_DIR="$MNT/ProgramData/Microsoft/Windows/Start Menu/Programs/Startup"
+    if [ -d "$STARTUP_DIR" ] || mkdir -p "$STARTUP_DIR" 2>/dev/null; then
+        cp "$SCRIPTS_DIR/DisableNags.cmd" "$STARTUP_DIR/DisableNags.bat" 2>/dev/null
+    fi
+
+    printf "  ${GREEN}Microsoft account nags disabled!${NC}\n"
+}
+
+case "$OPT" in
+    1) do_oobe_bypass ;;
+    2) do_nag_disable ;;
+    3) do_oobe_bypass; do_nag_disable ;;
+    0) umount "$MNT" 2>/dev/null; rmdir "$MNT" 2>/dev/null; exit 0 ;;
+    *) printf "Invalid.\n" ;;
+esac
+
+sync; sync
+umount "$MNT" 2>/dev/null; rmdir "$MNT" 2>/dev/null
+
+printf "\n${CYAN}==============================================${NC}\n"
+printf "${GREEN}  Done! Reboot into Windows.${NC}\n"
+printf "${CYAN}==============================================${NC}\n"
+printf "\n${BOLD}If you're in Windows setup (OOBE):${NC}\n"
+printf "  - You'll see 'I don't have internet' option\n"
+printf "  - Click it to create a local account\n"
+printf "  - Or press Shift+F10, type: bypassnro.bat\n"
+printf "\n"
+printf "Press Enter..."; read dummy

@@ -1,0 +1,121 @@
+#!/bin/sh
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+while true; do
+    clear
+    printf "${YELLOW}  Run: sh /usr/local/bin/toolkit-menu${NC}\n"
+    printf "${CYAN}=== Boot Repair ===${NC}\n\n"
+    printf "  ${BOLD}1)${NC} Check EFI boot entries\n"
+    printf "  ${BOLD}2)${NC} Check EFI System Partition\n"
+    printf "  ${BOLD}3)${NC} Fix Windows UEFI bootloader\n"
+    printf "  ${BOLD}4)${NC} Show partition table\n"
+    printf "  ${BOLD}0)${NC} Back to main menu\n"
+    printf "\n  Choose: "; read CH
+
+    case "$CH" in
+        1)
+            printf "\n${BOLD}EFI Boot Entries:${NC}\n\n"
+            if command -v efibootmgr >/dev/null 2>&1; then
+                efibootmgr -v 2>&1
+            else
+                printf "${YELLOW}  efibootmgr not available.${NC}\n"
+                printf "  Install with: apk add efibootmgr\n"
+                # Show what we can from /sys
+                if [ -d /sys/firmware/efi ]; then
+                    printf "\n  System booted in UEFI mode.\n"
+                    ls /sys/firmware/efi/efivars/ 2>/dev/null | head -10
+                else
+                    printf "\n  System booted in Legacy/BIOS mode.\n"
+                fi
+            fi
+            printf "\nPress Enter..."; read dummy
+            ;;
+        2)
+            printf "\n${BOLD}Looking for EFI System Partitions:${NC}\n\n"
+            BLKOUT=$(blkid 2>/dev/null)
+            for p in /dev/sd*[0-9] /dev/nvme*p[0-9]*; do
+                [ -b "$p" ] || continue
+                echo "$BLKOUT" | grep "^${p}:" | grep -q 'TYPE="vfat"' || continue
+                printf "  Checking %s...\n" "$p"
+                TMPMNT=$(mktemp -d)
+                mount -t vfat -o ro "$p" "$TMPMNT" 2>/dev/null || { rmdir "$TMPMNT"; continue; }
+                if [ -d "$TMPMNT/EFI" ]; then
+                    printf "    ${GREEN}EFI partition found!${NC}\n"
+                    printf "    Contents of /EFI/:\n"
+                    ls -la "$TMPMNT/EFI/" 2>/dev/null | sed 's/^/      /'
+                    if [ -f "$TMPMNT/EFI/Microsoft/Boot/bootmgfw.efi" ]; then
+                        printf "    ${GREEN}Windows bootloader: PRESENT${NC}\n"
+                    else
+                        printf "    ${RED}Windows bootloader: MISSING${NC}\n"
+                    fi
+                    if [ -f "$TMPMNT/EFI/BOOT/BOOTX64.EFI" ]; then
+                        printf "    ${GREEN}Fallback bootloader: PRESENT${NC}\n"
+                    else
+                        printf "    ${YELLOW}Fallback bootloader: MISSING${NC}\n"
+                    fi
+                fi
+                umount "$TMPMNT" 2>/dev/null; rmdir "$TMPMNT"
+            done
+            printf "\nPress Enter..."; read dummy
+            ;;
+        3)
+            printf "\n${YELLOW}  This will attempt to fix the Windows UEFI bootloader.${NC}\n"
+            printf "  It copies bootmgfw.efi to the fallback boot path.\n\n"
+
+            # Find EFI partition
+            BLKOUT=$(blkid 2>/dev/null)
+            EFIPART=""
+            for p in /dev/sd*[0-9] /dev/nvme*p[0-9]*; do
+                [ -b "$p" ] || continue
+                echo "$BLKOUT" | grep "^${p}:" | grep -q 'TYPE="vfat"' || continue
+                TMPMNT=$(mktemp -d)
+                mount -t vfat -o ro "$p" "$TMPMNT" 2>/dev/null || { rmdir "$TMPMNT"; continue; }
+                if [ -f "$TMPMNT/EFI/Microsoft/Boot/bootmgfw.efi" ]; then
+                    EFIPART="$p"
+                    umount "$TMPMNT" 2>/dev/null; rmdir "$TMPMNT"
+                    break
+                fi
+                umount "$TMPMNT" 2>/dev/null; rmdir "$TMPMNT"
+            done
+
+            if [ -z "$EFIPART" ]; then
+                printf "${RED}  Could not find Windows bootloader on any EFI partition.${NC}\n"
+                printf "\nPress Enter..."; read dummy
+                continue
+            fi
+
+            printf "  Found Windows bootloader on %s\n" "$EFIPART"
+            printf "  Type FIX to proceed: "; read CONF
+            if [ "$CONF" = "FIX" ]; then
+                EFIMNT=$(mktemp -d)
+                mount -t vfat -o rw "$EFIPART" "$EFIMNT" 2>/dev/null
+                mkdir -p "$EFIMNT/EFI/BOOT" 2>/dev/null
+                cp "$EFIMNT/EFI/Microsoft/Boot/bootmgfw.efi" "$EFIMNT/EFI/BOOT/BOOTX64.EFI" 2>/dev/null
+                sync
+                umount "$EFIMNT" 2>/dev/null; rmdir "$EFIMNT"
+                printf "${GREEN}  Boot repair complete!${NC}\n"
+            else
+                printf "  Aborted.\n"
+            fi
+            printf "\nPress Enter..."; read dummy
+            ;;
+        4)
+            printf "\n${BOLD}Partition Tables:${NC}\n\n"
+            for disk in /dev/sd? /dev/nvme?n?; do
+                [ -b "$disk" ] || continue
+                printf "  ${BOLD}%s:${NC}\n" "$disk"
+                if command -v fdisk >/dev/null 2>&1; then
+                    fdisk -l "$disk" 2>/dev/null | grep -E "^/dev|^Disk /dev|Disklabel"| sed 's/^/    /'
+                else
+                    blkid 2>/dev/null | grep "^${disk}" | sed 's/^/    /'
+                fi
+                printf "\n"
+            done
+            printf "\nPress Enter..."; read dummy
+            ;;
+        0) break ;;
+    esac
+done

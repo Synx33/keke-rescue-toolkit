@@ -1,0 +1,76 @@
+#!/bin/sh
+CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BOLD='\033[1m'; NC='\033[0m'
+
+clear
+printf "${YELLOW}  Run: sh /usr/local/bin/toolkit-menu${NC}\n"
+printf "${CYAN}=== System Information ===${NC}\n\n"
+
+printf "${BOLD}CPU:${NC}\n"
+grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ /  /'
+printf "  Cores: %s\n" "$(grep -c "^processor" /proc/cpuinfo 2>/dev/null)"
+
+printf "\n${BOLD}Memory:${NC}\n"
+TOTAL=$(awk '/MemTotal/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null)
+FREE=$(awk '/MemAvailable/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null)
+printf "  Total: %s MB  |  Available: %s MB\n" "$TOTAL" "$FREE"
+
+printf "\n${BOLD}Disks:${NC}\n"
+for disk in /sys/block/sd* /sys/block/nvme* /sys/block/mmcblk*; do
+    [ -e "$disk" ] || continue
+    NAME=$(basename "$disk")
+    SIZE=$(cat "$disk/size" 2>/dev/null)
+    [ -z "$SIZE" ] && continue
+    SIZE_GB=$(awk "BEGIN {printf \"%.1f\", $SIZE * 512 / 1073741824}")
+    MODEL=$(cat "$disk/device/model" 2>/dev/null | sed 's/ *$//')
+    printf "  /dev/%s: %s GB  %s\n" "$NAME" "$SIZE_GB" "$MODEL"
+done
+
+printf "\n${BOLD}Partitions:${NC}\n"
+blkid 2>/dev/null | while read line; do
+    DEV=$(echo "$line" | cut -d: -f1)
+    LABEL=$(echo "$line" | sed -n 's/.*LABEL="\([^"]*\)".*/\1/p')
+    TYPE=$(echo "$line" | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')
+    printf "  %s  %s  [%s]\n" "$DEV" "${LABEL:-}" "$TYPE"
+done
+
+printf "\n${BOLD}Network:${NC}\n"
+for iface in $(ls /sys/class/net/ 2>/dev/null); do
+    [ "$iface" = "lo" ] && continue
+    STATE=$(cat /sys/class/net/$iface/operstate 2>/dev/null)
+    ADDR=$(ip -4 addr show "$iface" 2>/dev/null | grep "inet " | awk '{print $2}')
+    MAC=$(cat /sys/class/net/$iface/address 2>/dev/null)
+    printf "  %s: %s  IP=%s  MAC=%s\n" "$iface" "$STATE" "${ADDR:-none}" "$MAC"
+done
+
+printf "\n${BOLD}PCI Devices (network):${NC}\n"
+for d in /sys/bus/pci/devices/*; do
+    CLASS=$(cat "$d/class" 2>/dev/null)
+    case "$CLASS" in 0x028*|0x020*)
+        VENDOR=$(cat "$d/vendor" 2>/dev/null)
+        DEVICE=$(cat "$d/device" 2>/dev/null)
+        printf "  %s vendor=%s device=%s\n" "$(basename $d)" "$VENDOR" "$DEVICE"
+    ;; esac
+done
+
+printf "\n${BOLD}USB Devices:${NC}\n"
+for d in /sys/bus/usb/devices/[0-9]*; do
+    [ -f "$d/product" ] || continue
+    PROD=$(cat "$d/product" 2>/dev/null)
+    MANUF=$(cat "$d/manufacturer" 2>/dev/null)
+    printf "  %s %s\n" "${MANUF:-}" "$PROD"
+done
+
+printf "\n${BOLD}BIOS:${NC}\n"
+cat /sys/class/dmi/id/bios_vendor 2>/dev/null | sed 's/^/  Vendor: /'
+cat /sys/class/dmi/id/bios_version 2>/dev/null | sed 's/^/  Version: /'
+cat /sys/class/dmi/id/product_name 2>/dev/null | sed 's/^/  Product: /'
+
+printf "\n${BOLD}Battery:${NC}\n"
+BAT="/sys/class/power_supply/BAT0"
+if [ -d "$BAT" ]; then
+    STATUS=$(cat "$BAT/status" 2>/dev/null)
+    CAP=$(cat "$BAT/capacity" 2>/dev/null)
+    printf "  Status: %s  Charge: %s%%\n" "$STATUS" "$CAP"
+else
+    printf "  No battery detected\n"
+fi

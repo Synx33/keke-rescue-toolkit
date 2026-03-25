@@ -1,0 +1,52 @@
+#!/bin/sh
+# USB Watchdog - detects USB removal and triggers shutdown animation + reboot
+# Runs in background
+
+USB_PATH="$1"
+
+# If no path given, find it
+if [ -z "$USB_PATH" ]; then
+    for m in /media/* /mnt/*; do
+        [ -d "$m/packages" ] && USB_PATH="$m" && break
+        [ -f "$m/.alpine-release" ] && USB_PATH="$m" && break
+    done
+fi
+
+[ -z "$USB_PATH" ] && exit 1
+
+# Find the USB device (e.g., /dev/sdb1)
+USB_DEV=$(mount | grep "$USB_PATH" | awk '{print $1}' | head -1)
+# Get the base disk (e.g., /dev/sdb)
+USB_DISK=$(echo "$USB_DEV" | sed 's/[0-9]*$//')
+
+while true; do
+    sleep 2
+
+    GONE=0
+
+    # Method 1: Check if mount point is still accessible
+    if ! ls "$USB_PATH" >/dev/null 2>&1; then
+        GONE=1
+    fi
+
+    # Method 2: Check if the block device still exists
+    if [ -n "$USB_DEV" ] && [ ! -b "$USB_DEV" ]; then
+        GONE=1
+    fi
+
+    # Method 3: Check if the disk is still in /sys/block
+    if [ -n "$USB_DISK" ]; then
+        DISK_NAME=$(basename "$USB_DISK")
+        [ ! -d "/sys/block/$DISK_NAME" ] && GONE=1
+    fi
+
+    if [ "$GONE" -eq 1 ]; then
+        # USB removed! Run shutdown animation and reboot
+        sh /usr/local/bin/shutdown-animation 2>/dev/null
+        sleep 1
+        reboot -f 2>/dev/null
+        # Fallback if reboot -f doesn't work
+        echo b > /proc/sysrq-trigger 2>/dev/null
+        exit 0
+    fi
+done

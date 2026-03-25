@@ -1,0 +1,139 @@
+#!/bin/sh
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+show_menu() {
+    clear
+    printf "${YELLOW}  Run: sh /usr/local/bin/toolkit-menu${NC}\n"
+    printf "${CYAN}"
+    printf "==============================================\n"
+    printf "        USB Rescue Toolkit v2.0               \n"
+    printf "==============================================\n"
+    printf "${NC}\n"
+
+    # Show IP if connected
+    for iface in $(ls /sys/class/net/ 2>/dev/null); do
+        [ "$iface" = "lo" ] && continue
+        ADDR=$(ip -4 addr show "$iface" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+        [ -n "$ADDR" ] && printf "  ${GREEN}SSH: ssh root@%s (password: reset)${NC}\n" "$ADDR"
+    done
+    printf "\n"
+
+    printf "  ${BOLD}1)${NC} Windows Password Reset\n"
+    printf "  ${BOLD}2)${NC} Win11 Microsoft Account Bypass\n"
+    printf "  ${BOLD}3)${NC} Lock Screen Quick-Boot Setup\n"
+    printf "  ${BOLD}4)${NC} System Information\n"
+    printf "  ${BOLD}5)${NC} Disk Management\n"
+    printf "  ${BOLD}6)${NC} Disk Clone / Imaging\n"
+    printf "  ${BOLD}7)${NC} Data Backup / File Recovery\n"
+    printf "  ${BOLD}8)${NC} Network Diagnostics\n"
+    printf "  ${BOLD}9)${NC} Hardware Tests\n"
+    printf "  ${BOLD}b)${NC} Boot Repair\n"
+    printf "  ${BOLD}w)${NC} Connect to WiFi\n"
+    printf "  ${BOLD}s)${NC} Drop to Shell\n"
+    printf "  ${BOLD}0)${NC} Reboot / Shutdown\n"
+    printf "\n  Choose: "
+}
+
+while true; do
+    show_menu
+    read CHOICE
+    case "$CHOICE" in
+        1) sh /usr/local/bin/reset-windows-password ;;
+        2) sh /usr/local/bin/win11-bypass ;;
+        3) sh /usr/local/bin/lockscreen-reboot ;;
+        4) sh /usr/local/bin/system-info; printf "\nPress Enter..."; read dummy ;;
+        5) sh /usr/local/bin/disk-manager ;;
+        6) sh /usr/local/bin/disk-clone ;;
+        7) sh /usr/local/bin/data-backup ;;
+        8) sh /usr/local/bin/network-diag ;;
+        9) sh /usr/local/bin/hardware-test ;;
+        b|B) sh /usr/local/bin/boot-repair ;;
+        w|W)
+            # Load WiFi + network tools on-demand (not at boot)
+            printf "\n${GREEN}Loading network drivers...${NC}\n"
+            # Install WiFi binaries if not already there
+            USB=""
+            for m in /media/* /mnt/*; do [ -d "$m/bin_all" ] && USB="$m" && break; done
+            if [ -n "$USB" ] && [ -d "$USB/bin_all" ]; then
+                B="$USB/bin_all"
+                [ ! -x /sbin/wpa_supplicant ] && {
+                    cp "$B/wpa_supplicant" "$B/wpa_cli" "$B/wpa_passphrase" /sbin/ 2>/dev/null
+                    chmod +x /sbin/wpa_supplicant /sbin/wpa_cli /sbin/wpa_passphrase 2>/dev/null
+                }
+                [ ! -x /usr/sbin/iw ] && {
+                    cp "$B/iw" "$B/iwconfig" "$B/iwlist" /usr/sbin/ 2>/dev/null
+                    chmod +x /usr/sbin/iw /usr/sbin/iwconfig /usr/sbin/iwlist 2>/dev/null
+                }
+                [ ! -x /usr/sbin/sshd ] && {
+                    cp "$B/sshd" /usr/sbin/ 2>/dev/null
+                    mkdir -p /usr/lib/ssh 2>/dev/null
+                    cp "$B/sshd-session" /usr/lib/ssh/ 2>/dev/null
+                    cp "$B/ssh-keygen" /usr/bin/ 2>/dev/null
+                    cp "$B/ssh" /usr/bin/ 2>/dev/null
+                    cp "$B/sftp-server" /usr/lib/ssh/ 2>/dev/null
+                    chmod +x /usr/sbin/sshd /usr/bin/ssh-keygen /usr/bin/ssh /usr/lib/ssh/sftp-server /usr/lib/ssh/sshd-session 2>/dev/null
+                }
+            fi
+            # Load WiFi kernel modules
+            rfkill unblock all 2>/dev/null
+            depmod -a 2>/dev/null
+            for mod in cfg80211 mac80211 iwlwifi iwlmvm iwldvm \
+                       ath9k ath9k_htc ath10k_pci ath11k_pci brcmfmac \
+                       rtw88_pci rtw88_usb rtw89pci rtl8xxxu mt7921e mt7921s; do
+                modprobe "$mod" 2>/dev/null
+            done
+            sleep 2
+            # Start SSH if not running
+            if ! pidof sshd >/dev/null 2>&1; then
+                mkdir -p /etc/ssh /usr/lib/ssh
+                ssh-keygen -A 2>/dev/null
+                echo "PermitRootLogin yes" >> /etc/ssh/sshd_config 2>/dev/null
+                echo "root:reset" | chpasswd 2>/dev/null
+                /usr/sbin/sshd 2>/dev/null
+            fi
+            # Ethernet quick try
+            for iface in $(ls /sys/class/net/ 2>/dev/null); do
+                case "$iface" in eth*|en*) ip link set "$iface" up 2>/dev/null; udhcpc -i "$iface" -q -t 2 -n 2>/dev/null;; esac
+            done
+            # Find WiFi interface
+            WIFI_IF=""
+            for iface in $(ls /sys/class/net/ 2>/dev/null); do
+                [ "$iface" = "lo" ] && continue
+                [ -d "/sys/class/net/$iface/wireless" ] && WIFI_IF="$iface" && break
+                iw dev "$iface" info >/dev/null 2>&1 && WIFI_IF="$iface" && break
+            done
+            if [ -n "$WIFI_IF" ]; then
+                ip link set "$WIFI_IF" up 2>/dev/null; sleep 1
+                printf "${GREEN}Scanning...${NC}\n"
+                iw "$WIFI_IF" scan 2>/dev/null | grep "SSID:" | sort -u | sed 's/.*SSID: //' | grep -v "^$" | while read s; do printf "  - %s\n" "$s"; done
+                printf "\nSSID: "; read SSID
+                [ -z "$SSID" ] && continue
+                printf "Password: "; stty -echo 2>/dev/null; read WPASS; stty echo 2>/dev/null; printf "\n"
+                killall wpa_supplicant 2>/dev/null
+                wpa_passphrase "$SSID" "$WPASS" > /tmp/w.conf 2>/dev/null
+                wpa_supplicant -B -i "$WIFI_IF" -c /tmp/w.conf 2>/dev/null
+                sleep 3
+                udhcpc -i "$WIFI_IF" -q -t 5 -n 2>/dev/null
+                IP=$(ip -4 addr show "$WIFI_IF" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+                [ -n "$IP" ] && printf "${GREEN}Connected! IP: %s  SSH: ssh root@%s (pass: reset)${NC}\n" "$IP" "$IP" || printf "${YELLOW}Connected but no IP yet.${NC}\n"
+                sleep 2
+            else
+                printf "${RED}No WiFi adapter found.${NC}\n"; sleep 2
+            fi
+            ;;
+        s|S)
+            printf "\nType 'exit' to return to menu.\n"
+            /bin/sh -l
+            ;;
+        0)
+            printf "\n  1) Reboot\n  2) Shutdown\n  Choice: "; read PC
+            case "$PC" in
+                1) reboot ;;
+                2) poweroff ;;
+            esac
+            ;;
+    esac
+done

@@ -1,0 +1,145 @@
+#!/bin/sh
+BG=$(printf '\033[1;32m')
+G=$(printf '\033[0;32m')
+DG=$(printf '\033[2;32m')
+W=$(printf '\033[1;37m')
+N=$(printf '\033[0m')
+
+COLS=$(stty size 2>/dev/null | awk '{print $2}')
+ROWS=$(stty size 2>/dev/null | awk '{print $1}')
+[ -z "$COLS" ] && COLS=80
+[ -z "$ROWS" ] && ROWS=24
+
+printf '\033[?25l'
+clear
+
+center() {
+    PLAIN=$(printf "%s" "$1" | sed 's/\x1b\[[0-9;]*m//g')
+    LEN=${#PLAIN}
+    PAD=$(( (COLS - LEN) / 2 ))
+    [ "$PAD" -lt 0 ] && PAD=0
+    SPACES=""
+    I=0; while [ $I -lt $PAD ]; do SPACES="${SPACES} "; I=$((I+1)); done
+    printf "%s%s\n" "$SPACES" "$1"
+}
+
+VPAD=$(( (ROWS - 16) / 2 ))
+[ "$VPAD" -lt 1 ] && VPAD=1
+vpad() { I=0; while [ $I -lt $VPAD ]; do printf "\n"; I=$((I+1)); done; }
+
+R1="██████╗  ███████╗███████╗ ██████╗██╗   ██╗███████╗"
+R2="██╔══██╗ ██╔════╝██╔════╝██╔════╝██║   ██║██╔════╝"
+R3="██████╔╝ █████╗  ███████╗██║     ██║   ██║█████╗  "
+R4="██╔══██╗ ██╔══╝  ╚════██║██║     ██║   ██║██╔══╝  "
+R5="██║  ██║ ███████╗███████║╚██████╗╚██████╔╝███████╗"
+R6="╚═╝  ╚═╝ ╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚══════╝"
+
+T1="████████╗ ██████╗  ██████╗ ██╗     ██╗  ██╗██╗████████╗"
+T2="╚══██╔══╝██╔═══██╗██╔═══██╗██║     ██║ ██╔╝██║╚══██╔══╝"
+T3="   ██║   ██║   ██║██║   ██║██║     █████╔╝ ██║   ██║   "
+T4="   ██║   ██║   ██║██║   ██║██║     ██╔═██╗ ██║   ██║   "
+T5="   ██║   ╚██████╔╝╚██████╔╝███████╗██║  ██╗██║   ██║   "
+T6="   ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝   ╚═╝   "
+
+sleep 0.5
+
+# Fade in RESCUE line by line
+clear; vpad
+center "${DG}${R1}${N}"
+sleep 0.2
+clear; vpad
+center "${DG}${R1}${N}"
+center "${DG}${R2}${N}"
+sleep 0.2
+clear; vpad
+center "${DG}${R1}${N}"
+center "${DG}${R2}${N}"
+center "${DG}${R3}${N}"
+sleep 0.2
+clear; vpad
+center "${DG}${R1}${N}"
+center "${DG}${R2}${N}"
+center "${DG}${R3}${N}"
+center "${DG}${R4}${N}"
+sleep 0.2
+clear; vpad
+center "${DG}${R1}${N}"
+center "${DG}${R2}${N}"
+center "${DG}${R3}${N}"
+center "${DG}${R4}${N}"
+center "${DG}${R5}${N}"
+center "${DG}${R6}${N}"
+sleep 0.3
+
+# Add TOOLKIT below
+clear; vpad
+center "${DG}${R1}${N}"
+center "${DG}${R2}${N}"
+center "${DG}${R3}${N}"
+center "${DG}${R4}${N}"
+center "${DG}${R5}${N}"
+center "${DG}${R6}${N}"
+center "${DG}${T1}${N}"
+center "${DG}${T2}${N}"
+center "${DG}${T3}${N}"
+center "${DG}${T4}${N}"
+center "${DG}${T5}${N}"
+center "${DG}${T6}${N}"
+sleep 0.4
+
+# Brighten to normal
+clear; vpad
+center "${G}${R1}${N}"
+center "${G}${R2}${N}"
+center "${G}${R3}${N}"
+center "${G}${R4}${N}"
+center "${G}${R5}${N}"
+center "${G}${R6}${N}"
+center "${G}${T1}${N}"
+center "${G}${T2}${N}"
+center "${G}${T3}${N}"
+center "${G}${T4}${N}"
+center "${G}${T5}${N}"
+center "${G}${T6}${N}"
+sleep 0.4
+
+# Full bright + by KEKE
+clear; vpad
+center "${BG}${R1}${N}"
+center "${BG}${R2}${N}"
+center "${BG}${R3}${N}"
+center "${BG}${R4}${N}"
+center "${BG}${R5}${N}"
+center "${BG}${R6}${N}"
+center "${BG}${T1}${N}"
+center "${BG}${T2}${N}"
+center "${BG}${T3}${N}"
+center "${BG}${T4}${N}"
+center "${BG}${T5}${N}"
+center "${BG}${T6}${N}"
+printf "\n"
+center "${DG}by KEKE${N}"
+sleep 0.5
+
+# Loading bar
+printf "\n"
+BAR_W=30
+CPAD=$(( (COLS - BAR_W - 10) / 2 ))
+[ "$CPAD" -lt 0 ] && CPAD=0
+SPACES=""
+I=0; while [ $I -lt $CPAD ]; do SPACES="${SPACES} "; I=$((I+1)); done
+
+I=0; while [ $I -le $BAR_W ]; do
+    F=""; E=""
+    J=0; while [ $J -lt $I ]; do F="${F}█"; J=$((J+1)); done
+    J=$I; while [ $J -lt $BAR_W ]; do E="${E}░"; J=$((J+1)); done
+    PCT=$(( I * 100 / BAR_W ))
+    printf "\r%s${G}  [${BG}%s${DG}%s${G}] ${W}%3d%%${N}" "$SPACES" "$F" "$E" "$PCT"
+    sleep 0.1
+    I=$((I+1))
+done
+
+printf "\n\n"
+center "${BG}READY${N}"
+sleep 0.2
+printf '\033[?25h'

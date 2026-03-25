@@ -1,0 +1,312 @@
+#!/bin/sh
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Detect USB boot drive (has PWRESET label) - refuse to write to it
+get_usb_boot_dev() {
+    BLKOUT=$(blkid 2>/dev/null)
+    USB_BOOT_PART=$(echo "$BLKOUT" | grep 'LABEL="PWRESET"' | cut -d: -f1)
+    if [ -n "$USB_BOOT_PART" ]; then
+        # Strip partition number to get the disk
+        echo "$USB_BOOT_PART" | sed 's/[0-9]*$//; s/p$//'
+    fi
+}
+
+USB_BOOT_DISK=$(get_usb_boot_dev)
+
+is_usb_boot() {
+    [ -z "$USB_BOOT_DISK" ] && return 1
+    case "$1" in
+        ${USB_BOOT_DISK}*) return 0 ;;
+    esac
+    return 1
+}
+
+show_disks() {
+    printf "\n${BOLD}  Detected Disks:${NC}\n\n"
+    DNUM=0
+    DISKS=""
+    for disk in /sys/block/sd* /sys/block/nvme* /sys/block/mmcblk*; do
+        [ -e "$disk" ] || continue
+        NAME=$(basename "$disk")
+        SIZE=$(cat "$disk/size" 2>/dev/null)
+        [ -z "$SIZE" ] || [ "$SIZE" = "0" ] && continue
+        SIZE_GB=$(awk "BEGIN {printf \"%.1f\", $SIZE * 512 / 1073741824}")
+        MODEL=$(cat "$disk/device/model" 2>/dev/null | sed 's/ *$//')
+        [ -z "$MODEL" ] && MODEL=$(cat "$disk/device/name" 2>/dev/null | sed 's/ *$//')
+        DNUM=$((DNUM+1))
+        DISKS="$DISKS /dev/$NAME"
+
+        # Mark USB boot disk
+        USBMARK=""
+        is_usb_boot "/dev/$NAME" && USBMARK=" ${RED}[USB BOOT]${NC}"
+
+        printf "    ${BOLD}%d) /dev/%s${NC}  %s GB  %s%b\n" "$DNUM" "$NAME" "$SIZE_GB" "$MODEL" "$USBMARK"
+
+        # Show partitions
+        BLKOUT=$(blkid 2>/dev/null)
+        for pdev in /sys/block/$NAME/${NAME}*; do
+            [ -e "$pdev" ] || continue
+            PNAME=$(basename "$pdev")
+            PSIZE=$(cat "$pdev/size" 2>/dev/null)
+            [ -z "$PSIZE" ] || [ "$PSIZE" = "0" ] && continue
+            PSIZE_GB=$(awk "BEGIN {printf \"%.1f\", $PSIZE * 512 / 1073741824}")
+            LABEL=$(echo "$BLKOUT" | grep "^/dev/${PNAME}:" | sed -n 's/.*LABEL="\([^"]*\)".*/\1/p')
+            TYPE=$(echo "$BLKOUT" | grep "^/dev/${PNAME}:" | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')
+            MOUNTED=""
+            mount | grep -q "^/dev/${PNAME} " && MOUNTED=" ${GREEN}[mounted]${NC}"
+            printf "       /dev/%s  %s GB  %s  [%s]%b\n" "$PNAME" "$PSIZE_GB" "${LABEL:-}" "${TYPE:-unknown}" "$MOUNTED"
+        done
+        printf "\n"
+    done
+}
+
+pick_disk() {
+    PROMPT="$1"
+    printf "  %s (e.g. /dev/sda): " "$PROMPT"; read DISK
+    [ -b "$DISK" ] || { printf "${RED}  Not a valid block device.${NC}\n"; return 1; }
+    printf "%s" "$DISK"
+    return 0
+}
+
+pick_partition() {
+    PROMPT="$1"
+    printf "  %s (e.g. /dev/sda1): " "$PROMPT"; read PART
+    [ -b "$PART" ] || { printf "${RED}  Not a valid block device.${NC}\n"; return 1; }
+    printf "%s" "$PART"
+    return 0
+}
+
+get_dev_size_bytes() {
+    DEV="$1"
+    BNAME=$(basename "$DEV")
+    # Try /sys/block first (whole disk)
+    if [ -f "/sys/block/$BNAME/size" ]; then
+        SECTORS=$(cat "/sys/block/$BNAME/size")
+    else
+        # Partition - find parent
+        for parent in /sys/block/*/; do
+            if [ -f "${parent}${BNAME}/size" ]; then
+                SECTORS=$(cat "${parent}${BNAME}/size")
+                break
+            fi
+        done
+    fi
+    [ -z "$SECTORS" ] && { echo "0"; return; }
+    awk "BEGIN {printf \"%.0f\", $SECTORS * 512}"
+}
+
+get_dev_size_human() {
+    BYTES=$(get_dev_size_bytes "$1")
+    awk "BEGIN {printf \"%.1f GB\", $BYTES / 1073741824}"
+}
+
+while true; do
+    clear
+    printf "${YELLOW}  Run: sh /usr/local/bin/toolkit-menu${NC}\n"
+    printf "${CYAN}=== Disk Clone / Imaging ===${NC}\n"
+    show_disks
+    printf "  ${BOLD}Options:${NC}\n\n"
+    printf "    ${BOLD}1)${NC} Clone disk to disk\n"
+    printf "    ${BOLD}2)${NC} Create partition image (.img.gz)\n"
+    printf "    ${BOLD}3)${NC} Restore partition image\n"
+    printf "    ${BOLD}4)${NC} Verify clone (compare checksums)\n"
+    printf "    ${BOLD}0)${NC} Back to main menu\n"
+    printf "\n  Choose: "; read CH
+
+    case "$CH" in
+        1)
+            printf "\n${BOLD}  Clone Disk to Disk${NC}\n\n"
+            printf "${RED}  WARNING: All data on the destination disk will be DESTROYED!${NC}\n\n"
+
+            SRC_DISK=$(pick_disk "Source disk") || { sleep 2; continue; }
+            printf "\n"
+            DST_DISK=$(pick_disk "Destination disk") || { sleep 2; continue; }
+
+            # Safety: refuse USB boot drive as destination
+            if is_usb_boot "$DST_DISK"; then
+                printf "\n${RED}  ERROR: Destination is the USB boot drive (PWRESET). Refusing to clone.${NC}\n"
+                printf "  Press Enter..."; read dummy
+                continue
+            fi
+
+            # Refuse same disk
+            if [ "$SRC_DISK" = "$DST_DISK" ]; then
+                printf "\n${RED}  ERROR: Source and destination cannot be the same disk.${NC}\n"
+                printf "  Press Enter..."; read dummy
+                continue
+            fi
+
+            SRC_SIZE=$(get_dev_size_bytes "$SRC_DISK")
+            DST_SIZE=$(get_dev_size_bytes "$DST_DISK")
+            SRC_HUMAN=$(get_dev_size_human "$SRC_DISK")
+            DST_HUMAN=$(get_dev_size_human "$DST_DISK")
+
+            printf "\n  Source:      %s (%s)\n" "$SRC_DISK" "$SRC_HUMAN"
+            printf "  Destination: %s (%s)\n" "$DST_DISK" "$DST_HUMAN"
+
+            # Warn if dest is smaller
+            if [ "$(echo "$DST_SIZE $SRC_SIZE" | awk '{print ($1 < $2)}')" = "1" ]; then
+                printf "\n  ${YELLOW}WARNING: Destination disk is smaller than source!${NC}\n"
+                printf "  ${YELLOW}Clone may produce an incomplete copy.${NC}\n"
+            fi
+
+            printf "\n  ${RED}Type CLONE to confirm:${NC} "; read CONF
+            if [ "$CONF" != "CLONE" ]; then
+                printf "  Aborted.\n"
+                printf "  Press Enter..."; read dummy
+                continue
+            fi
+
+            # Unmount any partitions on destination
+            for mp in $(mount | grep "^${DST_DISK}" | awk '{print $3}'); do
+                umount "$mp" 2>/dev/null
+            done
+
+            printf "\n  Cloning %s -> %s ...\n\n" "$SRC_DISK" "$DST_DISK"
+
+            if command -v pv >/dev/null 2>&1; then
+                pv -s "$SRC_SIZE" < "$SRC_DISK" | dd of="$DST_DISK" bs=4M conv=notrunc,noerror 2>/dev/null
+            else
+                dd if="$SRC_DISK" of="$DST_DISK" bs=4M conv=notrunc,noerror status=progress 2>&1
+            fi
+            RESULT=$?
+            sync
+
+            if [ "$RESULT" -eq 0 ]; then
+                printf "\n  ${GREEN}Clone complete!${NC}\n"
+            else
+                printf "\n  ${RED}Clone finished with errors (exit code: %s).${NC}\n" "$RESULT"
+            fi
+            printf "  Press Enter..."; read dummy
+            ;;
+        2)
+            printf "\n${BOLD}  Create Partition Image${NC}\n\n"
+
+            SRC_PART=$(pick_partition "Source partition") || { sleep 2; continue; }
+
+            SRC_SIZE=$(get_dev_size_bytes "$SRC_PART")
+            SRC_HUMAN=$(get_dev_size_human "$SRC_PART")
+            # Rough estimate: compressed size ~40-60% of raw
+            EST_SIZE=$(awk "BEGIN {printf \"%.1f GB\", $SRC_SIZE * 0.5 / 1073741824}")
+
+            printf "\n  Partition: %s (%s)\n" "$SRC_PART" "$SRC_HUMAN"
+            printf "  Estimated compressed size: ~%s\n" "$EST_SIZE"
+
+            printf "\n  Save image to directory [/mnt]: "; read SAVEDIR
+            SAVEDIR=${SAVEDIR:-/mnt}
+            if [ ! -d "$SAVEDIR" ]; then
+                printf "${RED}  Directory does not exist.${NC}\n"
+                printf "  Press Enter..."; read dummy
+                continue
+            fi
+
+            PARTNAME=$(basename "$SRC_PART")
+            DATESTAMP=$(date +%Y%m%d_%H%M%S)
+            IMGFILE="${SAVEDIR}/${PARTNAME}_${DATESTAMP}.img.gz"
+
+            printf "  Output file: %s\n" "$IMGFILE"
+            printf "\n  Start imaging? (y/n): "; read YN
+            [ "$YN" != "y" ] && [ "$YN" != "Y" ] && { printf "  Aborted.\n"; sleep 1; continue; }
+
+            printf "\n  Creating image...\n\n"
+
+            if command -v pv >/dev/null 2>&1; then
+                pv -s "$SRC_SIZE" < "$SRC_PART" | gzip -c > "$IMGFILE"
+            else
+                dd if="$SRC_PART" bs=4M 2>/dev/null | gzip -c > "$IMGFILE"
+            fi
+            RESULT=$?
+            sync
+
+            if [ "$RESULT" -eq 0 ] && [ -f "$IMGFILE" ]; then
+                FSIZE=$(ls -lh "$IMGFILE" | awk '{print $5}')
+                printf "\n  ${GREEN}Image created successfully!${NC}\n"
+                printf "  File: %s (%s)\n" "$IMGFILE" "$FSIZE"
+            else
+                printf "\n  ${RED}Imaging failed.${NC}\n"
+            fi
+            printf "  Press Enter..."; read dummy
+            ;;
+        3)
+            printf "\n${BOLD}  Restore Partition Image${NC}\n\n"
+            printf "${RED}  WARNING: This will OVERWRITE the target partition!${NC}\n\n"
+
+            printf "  Path to image file (.img.gz): "; read IMGFILE
+            if [ ! -f "$IMGFILE" ]; then
+                printf "${RED}  File not found.${NC}\n"
+                printf "  Press Enter..."; read dummy
+                continue
+            fi
+
+            FSIZE=$(ls -lh "$IMGFILE" | awk '{print $5}')
+            printf "  Image file: %s (%s compressed)\n" "$IMGFILE" "$FSIZE"
+
+            DST_PART=$(pick_partition "Target partition") || { sleep 2; continue; }
+
+            # Safety: refuse USB boot drive
+            if is_usb_boot "$DST_PART"; then
+                printf "\n${RED}  ERROR: Target is on the USB boot drive (PWRESET). Refusing to restore.${NC}\n"
+                printf "  Press Enter..."; read dummy
+                continue
+            fi
+
+            DST_HUMAN=$(get_dev_size_human "$DST_PART")
+            printf "  Target: %s (%s)\n" "$DST_PART" "$DST_HUMAN"
+
+            printf "\n  ${RED}Type RESTORE to confirm:${NC} "; read CONF
+            if [ "$CONF" != "RESTORE" ]; then
+                printf "  Aborted.\n"
+                printf "  Press Enter..."; read dummy
+                continue
+            fi
+
+            # Unmount target if mounted
+            umount "$DST_PART" 2>/dev/null
+
+            printf "\n  Restoring image to %s ...\n\n" "$DST_PART"
+
+            if command -v pv >/dev/null 2>&1; then
+                pv "$IMGFILE" | gunzip -c | dd of="$DST_PART" bs=4M conv=notrunc,noerror 2>/dev/null
+            else
+                gunzip -c "$IMGFILE" | dd of="$DST_PART" bs=4M conv=notrunc,noerror 2>&1
+            fi
+            RESULT=$?
+            sync
+
+            if [ "$RESULT" -eq 0 ]; then
+                printf "\n  ${GREEN}Restore complete!${NC}\n"
+            else
+                printf "\n  ${RED}Restore finished with errors (exit code: %s).${NC}\n" "$RESULT"
+            fi
+            printf "  Press Enter..."; read dummy
+            ;;
+        4)
+            printf "\n${BOLD}  Verify Clone${NC}\n\n"
+            printf "  Compares MD5 checksums of the first 100 MB of two devices.\n\n"
+
+            DEV1=$(pick_disk "First device") || { sleep 2; continue; }
+            printf "\n"
+            DEV2=$(pick_disk "Second device") || { sleep 2; continue; }
+
+            printf "\n  Reading first 100 MB of each device...\n\n"
+
+            MD5_1=$(dd if="$DEV1" bs=1M count=100 2>/dev/null | md5sum | awk '{print $1}')
+            printf "  %s : %s\n" "$DEV1" "$MD5_1"
+
+            MD5_2=$(dd if="$DEV2" bs=1M count=100 2>/dev/null | md5sum | awk '{print $1}')
+            printf "  %s : %s\n" "$DEV2" "$MD5_2"
+
+            printf "\n"
+            if [ "$MD5_1" = "$MD5_2" ]; then
+                printf "  ${GREEN}${BOLD}MATCH! First 100 MB are identical.${NC}\n"
+            else
+                printf "  ${RED}${BOLD}MISMATCH! Devices differ in the first 100 MB.${NC}\n"
+            fi
+            printf "\n  Press Enter..."; read dummy
+            ;;
+        0) break ;;
+    esac
+done
